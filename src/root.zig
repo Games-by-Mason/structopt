@@ -5,8 +5,9 @@ const FieldEnum = std.meta.FieldEnum;
 const log = std.log.scoped(.structopt);
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
+const expectError = std.testing.expectError;
 
-pub const Error = error{ Parser, OutOfMemory };
+pub const Error = error{ Parser, Help, OutOfMemory };
 
 pub const Command = struct {
     const Self = @This();
@@ -136,10 +137,15 @@ pub const Command = struct {
                 break arg_str;
             }
 
+            // Check for help
+            try self.checkHelp(arg_str);
+
             // Parse the argument name
             const arg_name = if (arg_str.len > 2 and arg_str[1] == '-') arg_str[2..] else arg_str[1..];
             const negated = std.mem.startsWith(u8, arg_name, "no-");
             const lookup = if (negated) arg_name[3..] else arg_name;
+
+            // Look for this argument in the list of fields
             const field_enum = b: {
                 if (lookup.len == 1) {
                     break :b getShortArgs(self).get(lookup);
@@ -207,6 +213,10 @@ pub const Command = struct {
 
             // Make sure there are no remaining arguments
             if (iter.next()) |next| {
+                // Check for help
+                try self.checkHelp(next);
+
+                // Emit an error
                 log.err("unexpected positional argument \"{s}\"", .{next});
                 self.usage(true);
                 return error.Parser;
@@ -223,6 +233,13 @@ pub const Command = struct {
         }
 
         return result;
+    }
+
+    fn checkHelp(self: @This(), arg_str: []const u8) error{Help}!void {
+        if (std.mem.eql(u8, arg_str, "-h") or std.mem.eql(u8, arg_str, "--help")) {
+            self.usage(false);
+            return error.Help;
+        }
     }
 
     fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(Result(self))) {
@@ -301,6 +318,10 @@ pub const Command = struct {
         };
 
         if (value_str[0] == '-') {
+            // Check for help
+            try self.checkHelp(value_str);
+
+            // Emit an error
             log.err("{s}: expected a value", .{arg_str});
             self.usage(true);
             return error.Parser;
@@ -546,7 +567,7 @@ pub fn stringToEnum(comptime T: type, str: []const u8) ?T {
 
 test "all types nullable required" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -595,7 +616,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -620,7 +641,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--no-u32",
@@ -636,7 +657,7 @@ test "all types nullable required" {
 
 test "all types defaults" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -689,7 +710,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -714,7 +735,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "1",
@@ -725,7 +746,7 @@ test "all types defaults" {
 
 test "all types defaults and nullable but not null" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -778,7 +799,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -803,7 +824,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "1",
@@ -820,7 +841,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--no-u32",
@@ -836,7 +857,7 @@ test "all types defaults and nullable but not null" {
 
 test "all types defaults and nullable and null" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -889,7 +910,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -914,7 +935,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "1",
@@ -925,7 +946,7 @@ test "all types defaults and nullable and null" {
 
 test "all types required" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -978,7 +999,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -1003,7 +1024,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -1036,7 +1057,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u",
@@ -1054,15 +1075,15 @@ test "all types required" {
 }
 
 test "no args" {
-    const options = .{ .name = "command name" };
+    const options: Command = .{ .name = "command name" };
     const Result = Command.Result(options);
     try expectEqual(0, std.meta.fields(Result).len);
-    try expectEqual(Result{}, try Command.parseFromSlice(options, &.{"path"}));
+    try expectEqual(Result{}, try options.parseFromSlice(&.{"path"}));
 }
 
 test "only positional" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -1089,7 +1110,7 @@ test "only positional" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "1",
@@ -1100,7 +1121,7 @@ test "only positional" {
 
 test "only named" {
     const Enum = enum { foo, bar };
-    const options = .{
+    const options: Command = .{
         .name = "command name",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -1132,7 +1153,7 @@ test "only named" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
-    }, try Command.parseFromSlice(options, &.{
+    }, try options.parseFromSlice(&.{
         "path",
 
         "--u32",
@@ -1286,4 +1307,124 @@ test "help menu" {
             \\
         , found);
     }
+}
+
+test "help argument" {
+    const options: Command = .{
+        .name = "command name",
+        .named_args = &.{
+            NamedArg.init([]const u8, .{
+                .long = "named-1",
+            }),
+            NamedArg.init([]const u8, .{
+                .long = "named-2",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init([]const u8, .{
+                .meta = "POS-1",
+            }),
+            PositionalArg.init([]const u8, .{
+                .meta = "POS-2",
+            }),
+        },
+    };
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "-h",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "-h",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "-h",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "-h",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
+        "-h",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
+        "qux",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(&.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
+        "qux",
+        "-h",
+    }));
 }
