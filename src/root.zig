@@ -66,7 +66,15 @@ pub const Command = struct {
     }
 
     /// Show the help menu
-    pub fn usage(self: @This(), comptime brief: bool) void {
+    pub fn usageBrief(self: @This()) void {
+        self.usageImpl(true);
+    }
+
+    pub fn usage(self: @This()) void {
+        self.usageImpl(false);
+    }
+
+    fn usageImpl(self: @This(), comptime brief: bool) void {
         log.info("{}", .{self.fmtUsage(brief)});
     }
 
@@ -154,7 +162,7 @@ pub const Command = struct {
                 }
             } orelse {
                 log.err("unexpected argument \"{s}\"", .{arg_name});
-                self.usage(true);
+                self.usageBrief();
                 return error.Parser;
             };
             if (std.meta.fields(ArgEnum).len == 0) unreachable;
@@ -165,7 +173,7 @@ pub const Command = struct {
                     .found => {},
                     .positional => {
                         log.err("unexpected argument \"{s}\"", .{arg_name});
-                        self.usage(true);
+                        self.usageBrief();
                         return error.Parser;
                     },
                 }
@@ -182,7 +190,7 @@ pub const Command = struct {
                             @field(result, field.name) = null;
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
-                            self.usage(true);
+                            self.usageBrief();
                             return error.Parser;
                         }
                     } else {
@@ -218,7 +226,7 @@ pub const Command = struct {
 
                 // Emit an error
                 log.err("unexpected positional argument \"{s}\"", .{next});
-                self.usage(true);
+                self.usageBrief();
                 return error.Parser;
             }
         }
@@ -227,7 +235,7 @@ pub const Command = struct {
         inline for (std.meta.tags(ArgEnum)) |arg| {
             if (args.get(arg) == null) {
                 log.err("missing required argument \"{s}\"", .{@tagName(arg)});
-                self.usage(true);
+                self.usageBrief();
                 return error.Parser;
             }
         }
@@ -237,7 +245,7 @@ pub const Command = struct {
 
     fn checkHelp(self: @This(), arg_str: []const u8) error{Help}!void {
         if (std.mem.eql(u8, arg_str, "-h") or std.mem.eql(u8, arg_str, "--help")) {
-            self.usage(false);
+            self.usage();
             return error.Help;
         }
     }
@@ -279,7 +287,7 @@ pub const Command = struct {
                         arg_str,
                         value_str,
                     });
-                    self.usage(true);
+                    self.usageBrief();
                     return error.Parser;
                 };
             },
@@ -291,7 +299,7 @@ pub const Command = struct {
                         Inner,
                         value_str,
                     });
-                    self.usage(true);
+                    self.usageBrief();
                     return error.Parser;
                 };
             },
@@ -313,7 +321,7 @@ pub const Command = struct {
     ) Error![]const u8 {
         const value_str = peeked.* orelse iter.next() orelse {
             log.err("{s}: expected a value", .{arg_str});
-            self.usage(true);
+            self.usageBrief();
             return error.Parser;
         };
 
@@ -323,7 +331,7 @@ pub const Command = struct {
 
             // Emit an error
             log.err("{s}: expected a value", .{arg_str});
-            self.usage(true);
+            self.usageBrief();
             return error.Parser;
         }
 
