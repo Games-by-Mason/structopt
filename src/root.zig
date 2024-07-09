@@ -70,10 +70,10 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process
-    pub fn parse(gpa: Allocator, options: @This()) Error!Result(options) {
+    pub fn parse(self: @This(), gpa: Allocator) Error!Result(self) {
         var iter = try std.process.argsWithAllocator(gpa);
         defer iter.deinit();
-        return parseFromIter(gpa, options, &iter);
+        return parseFromIter(self, &iter);
     }
 
     /// Parse the given commands (for testing purposes)
