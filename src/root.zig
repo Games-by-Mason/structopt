@@ -78,6 +78,15 @@ pub const Command = struct {
         log.info("{}", .{self.fmtUsage(brief)});
     }
 
+    /// Parse the command line arguments for this process, exit on help or failure.
+    pub fn parseOrExit(self: @This(), gpa: Allocator) Result(self) {
+        return self.parse(gpa) catch |err| switch (err) {
+            error.Help => std.process.exit(0),
+            error.Parser => std.process.exit(2),
+            error.OutOfMemory => @panic("OOM"),
+        };
+    }
+
     /// Parse the command line arguments for this process
     pub fn parse(self: @This(), gpa: Allocator) Error!Result(self) {
         var iter = try std.process.argsWithAllocator(gpa);
