@@ -148,7 +148,7 @@ pub const Command = struct {
         _ = iter.skip();
 
         // Parse the named arguments
-        const positional_arg = while (iter.next()) |arg_str| {
+        var peeked = while (iter.next()) |arg_str| {
             // Stop parsing if we find a positional argument
             if (arg_str[0] != '-') {
                 break arg_str;
@@ -216,28 +216,24 @@ pub const Command = struct {
         } else null;
 
         // Parse positional arguments
-        if (positional_arg) |arg_str| {
-            // Parse all args in order, all positional arguments are required
-            var peeked: ?[]const u8 = arg_str;
-            inline for (self.positional_args) |field| {
-                @field(result, field.meta) = try self.parseValue(
-                    field.type,
-                    field.meta,
-                    iter,
-                    &peeked,
-                );
-            }
+        inline for (self.positional_args) |field| {
+            @field(result, field.meta) = try self.parseValue(
+                field.type,
+                field.meta,
+                iter,
+                &peeked,
+            );
+        }
 
-            // Make sure there are no remaining arguments
-            if (iter.next()) |next| {
-                // Check for help
-                try self.checkHelp(next);
+        // Make sure there are no remaining arguments
+        if (peeked orelse iter.next()) |next| {
+            // Check for help
+            try self.checkHelp(next);
 
-                // Emit an error
-                log.err("unexpected positional argument \"{s}\"", .{next});
-                self.usageBrief();
-                return error.Parser;
-            }
+            // Emit an error
+            log.err("unexpected positional argument \"{s}\"", .{next});
+            self.usageBrief();
+            return error.Parser;
         }
 
         // Make sure all non optional args were found
