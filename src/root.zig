@@ -7,7 +7,7 @@ const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectError = std.testing.expectError;
 
-pub const Error = error{ Parser, Help, OutOfMemory };
+pub const Error = error{ Parser, Help };
 
 pub const Command = struct {
     const Self = @This();
@@ -79,19 +79,16 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process, exit on help or failure.
-    pub fn parseOrExit(self: @This(), gpa: Allocator) Result(self) {
-        return self.parse(gpa) catch |err| switch (err) {
+    pub fn parseOrExit(self: @This(), iter: *std.process.ArgIterator) Result(self) {
+        return self.parse(iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
-            error.OutOfMemory => @panic("OOM"),
         };
     }
 
     /// Parse the command line arguments for this process
-    pub fn parse(self: @This(), gpa: Allocator) Error!Result(self) {
-        var iter = try std.process.argsWithAllocator(gpa);
-        defer iter.deinit();
-        return parseFromIter(self, &iter);
+    pub fn parse(self: @This(), iter: *std.process.ArgIterator) Error!Result(self) {
+        return parseFromAnyIter(self, &iter);
     }
 
     /// Parse the given commands (for testing purposes)
@@ -118,11 +115,11 @@ pub const Command = struct {
         };
 
         var iter = Iter.init(args);
-        return parseFromIter(self, &iter);
+        return parseFromAnyIter(self, &iter);
     }
 
     /// Parser implementation
-    fn parseFromIter(self: @This(), iter: anytype) Error!Result(self) {
+    fn parseFromAnyIter(self: @This(), iter: anytype) Error!Result(self) {
         // Initialize result with all defaults set
         const ParsedCommand = Result(self);
         var result: ParsedCommand = undefined;
@@ -145,10 +142,10 @@ pub const Command = struct {
         }
 
         // Skip the executable path
-        _ = iter.skip();
+        _ = iter.*.skip();
 
         // Parse the named arguments
-        var peeked = while (iter.next()) |arg_str| {
+        var peeked = while (iter.*.next()) |arg_str| {
             // Stop parsing if we find a positional argument
             if (arg_str[0] != '-') {
                 break arg_str;
@@ -217,16 +214,17 @@ pub const Command = struct {
 
         // Parse positional arguments
         inline for (self.positional_args) |field| {
-            @field(result, field.meta) = try self.parseValue(
+            const value = try self.parseValue(
                 field.type,
                 field.meta,
                 iter,
                 &peeked,
             );
+            @field(result, field.meta) = value;
         }
 
         // Make sure there are no remaining arguments
-        if (peeked orelse iter.next()) |next| {
+        if (peeked orelse iter.*.next()) |next| {
             // Check for help
             try self.checkHelp(next);
 
@@ -324,7 +322,7 @@ pub const Command = struct {
         iter: anytype,
         peeked: *?[]const u8,
     ) Error![]const u8 {
-        const value_str = peeked.* orelse iter.next() orelse {
+        const value_str = peeked.* orelse iter.*.next() orelse {
             log.err("{s}: expected a value", .{arg_str});
             self.usageBrief();
             return error.Parser;
