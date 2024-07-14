@@ -33,7 +33,7 @@ pub const Command = struct {
             fields[i] = .{
                 .name = arg.long,
                 .type = arg.type,
-                .default_value = null,
+                .default_value = arg.default,
                 .is_comptime = false,
                 .alignment = @alignOf(arg.type),
             };
@@ -79,20 +79,28 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process, exit on help or failure.
-    pub fn parseOrExit(self: @This(), iter: *std.process.ArgIterator) Result(self) {
+    pub fn parseOrExit(self: @This(), iter: *std.process.ArgIterator) self.Result() {
         return self.parse(iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
         };
     }
 
+    /// Parse the command line arguments for this process, return the defaults on help or failure.
+    /// Requires every argument have a default.
+    pub fn parseOrDefaults(self: @This(), iter: *std.process.ArgIterator) self.Result() {
+        return self.parse(iter) catch |err| switch (err) {
+            error.Help, error.Parser => .{},
+        };
+    }
+
     /// Parse the command line arguments for this process
-    pub fn parse(self: @This(), iter: *std.process.ArgIterator) Error!Result(self) {
+    pub fn parse(self: @This(), iter: *std.process.ArgIterator) Error!self.Result() {
         return parseFromAnyIter(self, &iter);
     }
 
     /// Parse the given commands (for testing purposes)
-    fn parseFromSlice(self: @This(), args: []const []const u8) Error!Result(self) {
+    fn parseFromSlice(self: @This(), args: []const []const u8) Error!self.Result() {
         const Iter = struct {
             slice: []const []const u8,
 
@@ -119,9 +127,9 @@ pub const Command = struct {
     }
 
     /// Parser implementation
-    fn parseFromAnyIter(self: @This(), iter: anytype) Error!Result(self) {
+    fn parseFromAnyIter(self: @This(), iter: anytype) Error!self.Result() {
         // Initialize result with all defaults set
-        const ParsedCommand = Result(self);
+        const ParsedCommand = self.Result();
         var result: ParsedCommand = undefined;
         inline for (self.named_args) |arg| {
             if (arg.default) |default| {
@@ -253,8 +261,8 @@ pub const Command = struct {
         }
     }
 
-    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(Result(self))) {
-        const ArgEnum = FieldEnum(Result(self));
+    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(self.Result())) {
+        const ArgEnum = FieldEnum(self.Result());
         const max_len = self.positional_args.len + self.named_args.len;
         comptime var short_args: [max_len]struct { []const u8, ArgEnum } = undefined;
         comptime var len = 0;
@@ -607,7 +615,7 @@ test "all types nullable required" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(7, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -701,7 +709,7 @@ test "all types defaults" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(7, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -790,7 +798,7 @@ test "all types defaults and nullable but not null" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(7, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -901,7 +909,7 @@ test "all types defaults and nullable and null" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(7, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -990,7 +998,7 @@ test "all types required" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(7, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -1087,7 +1095,7 @@ test "all types required" {
 
 test "no args" {
     const options: Command = .{ .name = "command name" };
-    const Result = Command.Result(options);
+    const Result = options.Result();
     try expectEqual(0, std.meta.fields(Result).len);
     try expectEqual(Result{}, try options.parseFromSlice(&.{"path"}));
 }
@@ -1109,7 +1117,7 @@ test "only positional" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(3, std.meta.fields(Result).len);
     try expectEqual(u8, @TypeOf(undef.U8));
@@ -1150,7 +1158,7 @@ test "only named" {
         },
     };
 
-    const Result = Command.Result(options);
+    const Result = options.Result();
     const undef: Result = undefined;
     try expectEqual(4, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
@@ -1438,4 +1446,44 @@ test "help argument" {
         "qux",
         "-h",
     }));
+}
+
+test "default field values" {
+    const options: Command = .{
+        .name = "command name",
+        .named_args = &.{
+            NamedArg.init(?u8, .{
+                .long = "named-1",
+                .default = .{ .value = null },
+            }),
+            NamedArg.init(?u8, .{
+                .long = "named-2",
+                .default = .{ .value = 10 },
+            }),
+            NamedArg.init(?u8, .{
+                .long = "named-3",
+                .default = .required,
+            }),
+            NamedArg.init(u8, .{
+                .long = "named-4",
+                .default = .{ .value = 10 },
+            }),
+            NamedArg.init(?u8, .{
+                .long = "named-5",
+                .default = .required,
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "POS-1",
+            }),
+        },
+    };
+    const Result = options.Result();
+    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-1").default_value.?)).*);
+    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-2").default_value.?)).*.?);
+    try expectEqual(null, std.meta.fieldInfo(Result, .@"named-3").default_value);
+    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-4").default_value.?)).*);
+    try expectEqual(null, std.meta.fieldInfo(Result, .@"named-5").default_value);
+    try expectEqual(null, std.meta.fieldInfo(Result, .@"POS-1").default_value);
 }
