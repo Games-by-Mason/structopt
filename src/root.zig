@@ -41,7 +41,7 @@ pub const Command = struct {
 
         // Add the positional args
         for (self.positional_args, 0..self.positional_args.len) |arg, i| {
-            if (@typeInfo(arg.type) == .Optional) {
+            if (@typeInfo(arg.type) == .optional) {
                 @compileError(arg.meta ++ ": positional arguments cannot be nullable");
             }
             if (arg.type == bool) {
@@ -57,7 +57,7 @@ pub const Command = struct {
         }
 
         // Create the type
-        return @Type(.{ .Struct = .{
+        return @Type(.{ .@"struct" = .{
             .layout = .auto,
             .fields = &fields,
             .decls = &.{},
@@ -200,7 +200,7 @@ pub const Command = struct {
                     if (negated) {
                         if (field.type == bool) {
                             @field(result, field.name) = false;
-                        } else if (@typeInfo(field.type) == .Optional) {
+                        } else if (@typeInfo(field.type) == .optional) {
                             @field(result, field.name) = null;
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
@@ -284,14 +284,14 @@ pub const Command = struct {
     ) Error!Type {
         // If we're optional, get the inner type
         const Inner = switch (@typeInfo(Type)) {
-            .Optional => |Optional| Optional.child,
+            .optional => |optional| optional.child,
             else => Type,
         };
 
         // Parse the type
         switch (@typeInfo(Inner)) {
-            .Bool => return true,
-            .Enum => {
+            .bool => return true,
+            .@"enum" => {
                 const value_str = try self.parseValueStr(arg_str, iter, peeked);
                 return std.meta.stringToEnum(Inner, value_str) orelse {
                     log.err("{s}: unexpected value \"{s}\"", .{
@@ -302,7 +302,7 @@ pub const Command = struct {
                     return error.Parser;
                 };
             },
-            .Int => {
+            .int => {
                 const value_str = try self.parseValueStr(arg_str, iter, peeked);
                 return std.fmt.parseInt(Inner, value_str, 0) catch {
                     log.err("{s}: expected {}, found \"{s}\"", .{
@@ -314,7 +314,7 @@ pub const Command = struct {
                     return error.Parser;
                 };
             },
-            .Pointer => |Pointer| {
+            .pointer => |Pointer| {
                 if (Pointer.child != u8 or !Pointer.is_const) {
                     unsupportedArgumentType(arg_str, Type);
                 }
@@ -401,7 +401,7 @@ pub const Command = struct {
     ) !void {
         // Get the inner type if optional
         const Inner: ?type = if (T) |Some| switch (@typeInfo(Some)) {
-            .Optional => |Optional| Optional.child,
+            .optional => |optional| optional.child,
             else => T,
         } else T;
 
@@ -430,7 +430,7 @@ pub const Command = struct {
 
         // If we're an enum, list all the options
         if (Inner) |Some| {
-            if (@typeInfo(Some) == .Enum) {
+            if (@typeInfo(Some) == .@"enum") {
                 for (std.meta.fieldNames(Some)) |name| {
                     try writer.writeByteNTimes(' ', if (positional) 4 else 6);
                     try writer.print("{s}\n", .{name});
@@ -454,10 +454,10 @@ pub const Command = struct {
         _ = options;
         const Some = T orelse return;
         switch (@typeInfo(Some)) {
-            .Bool => {},
-            .Int, .Float => try writer.print(" <{s}>", .{@typeName(Some)}),
-            .Enum => {},
-            .Pointer => try writer.writeAll(" <string>"),
+            .bool => {},
+            .int, .float => try writer.print(" <{s}>", .{@typeName(Some)}),
+            .@"enum" => {},
+            .pointer => try writer.writeAll(" <string>"),
             else => unreachable,
         }
     }
@@ -575,9 +575,9 @@ fn unsupportedArgumentType(arg_str: []const u8, ty: type) noreturn {
 // fails to compile under the current version of Zig if the struct only has a single argument. This
 // wrapper works around the issue.
 pub fn stringToEnum(comptime T: type, str: []const u8) ?T {
-    if (@typeInfo(T).Enum.fields.len == 1) {
-        if (std.mem.eql(u8, str, @typeInfo(T).Enum.fields[0].name)) {
-            return @enumFromInt(@typeInfo(T).Enum.fields[0].value);
+    if (@typeInfo(T).@"enum".fields.len == 1) {
+        if (std.mem.eql(u8, str, @typeInfo(T).@"enum".fields[0].name)) {
+            return @enumFromInt(@typeInfo(T).@"enum".fields[0].value);
         }
         return null;
     }
