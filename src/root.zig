@@ -5,9 +5,10 @@ const FieldEnum = std.meta.FieldEnum;
 const log = std.log.scoped(.structopt);
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
+const expectEqualSlices = std.testing.expectEqualSlices;
 const expectError = std.testing.expectError;
 
-pub const Error = error{ Parser, Help };
+pub const Error = error{ OutOfMemory, Parser, Help };
 
 pub const Command = struct {
     const Self = @This();
@@ -28,14 +29,18 @@ pub const Command = struct {
             if (arg.type == ?bool) {
                 @compileError(arg.long ++ ": booleans cannot be nullable");
             }
+            if (@typeInfo(arg.type) == .optional and arg.accum) {
+                @compileError(arg.long ++ ": accum arguments cannot be nullable");
+            }
             validateLongName(arg.long);
             if (arg.short) |short| validateShortName(short);
+            const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
             fields[i] = .{
                 .name = arg.long,
-                .type = arg.type,
+                .type = T,
                 .default_value = arg.default,
                 .is_comptime = false,
-                .alignment = @alignOf(arg.type),
+                .alignment = @alignOf(T),
             };
         }
 
@@ -65,6 +70,15 @@ pub const Command = struct {
         } });
     }
 
+    /// Frees the parsed result. Only necessary if lists are used.
+    pub fn parseFree(comptime self: @This(), result: self.Result()) void {
+        inline for (self.named_args) |named_arg| {
+            if (named_arg.accum) {
+                @field(result, named_arg.long).deinit();
+            }
+        }
+    }
+
     /// Show the help menu
     pub fn usageBrief(self: @This()) void {
         self.usageImpl(true);
@@ -78,11 +92,12 @@ pub const Command = struct {
         log.info("{}", .{self.fmtUsage(brief)});
     }
 
-    /// Parse the command line arguments for this process, exit on help or failure.
-    pub fn parseOrExit(self: @This(), iter: *std.process.ArgIterator) self.Result() {
-        return self.parse(iter) catch |err| switch (err) {
+    /// Parse the command line arguments for this process, exit on help or failure. Panics on OOM.
+    pub fn parseOrExit(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) self.Result() {
+        return self.parse(gpa, iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
+            error.OutOfMemory => @panic("OOM"),
         };
     }
 
@@ -95,12 +110,12 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process
-    pub fn parse(self: @This(), iter: *std.process.ArgIterator) Error!self.Result() {
-        return parseFromAnyIter(self, &iter);
+    pub fn parse(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) Error!self.Result() {
+        return self.parseFromAnyIter(gpa, &iter);
     }
 
     /// Parse the given commands (for testing purposes)
-    fn parseFromSlice(self: @This(), args: []const []const u8) Error!self.Result() {
+    fn parseFromSlice(self: @This(), gpa: Allocator, args: []const []const u8) Error!self.Result() {
         const Iter = struct {
             slice: []const []const u8,
 
@@ -123,11 +138,11 @@ pub const Command = struct {
         };
 
         var iter = Iter.init(args);
-        return parseFromAnyIter(self, &iter);
+        return self.parseFromAnyIter(gpa, &iter);
     }
 
     /// Parser implementation
-    fn parseFromAnyIter(self: @This(), iter: anytype) Error!self.Result() {
+    fn parseFromAnyIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
         // Initialize result with all defaults set
         const ParsedCommand = self.Result();
         var result: ParsedCommand = undefined;
@@ -140,12 +155,17 @@ pub const Command = struct {
         // Parse the arguments
         const ArgEnum = FieldEnum(ParsedCommand);
         var args: std.EnumMap(ArgEnum, enum { positional, found }) = .{};
+        comptime var accum: std.EnumSet(ArgEnum) = .initEmpty();
         inline for (self.positional_args) |positional_arg| {
             args.put(stringToEnum(ArgEnum, positional_arg.meta).?, .positional);
         }
         inline for (self.named_args) |named_arg| {
-            if (named_arg.default != null) {
+            if (named_arg.default != null or named_arg.accum) {
                 args.put(stringToEnum(ArgEnum, named_arg.long).?, .found);
+            }
+            if (named_arg.accum) {
+                comptime accum.insert(stringToEnum(ArgEnum, named_arg.long).?);
+                @field(result, named_arg.long) = .init(gpa);
             }
         }
 
@@ -202,6 +222,8 @@ pub const Command = struct {
                             @field(result, field.name) = false;
                         } else if (@typeInfo(field.type) == .optional) {
                             @field(result, field.name) = null;
+                        } else if (comptime accum.contains(field_enum_inline)) {
+                            @field(result, field.name).clearRetainingCapacity();
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
                             self.usageBrief();
@@ -209,12 +231,23 @@ pub const Command = struct {
                         }
                     } else {
                         var peeked: ?[]const u8 = null;
-                        @field(result, field.name) = try self.parseValue(
-                            field.type,
-                            arg_str,
-                            iter,
-                            &peeked,
-                        );
+                        if (comptime accum.contains(field_enum_inline)) {
+                            const Items = @TypeOf(@field(result, field.name).items);
+                            const Item = @typeInfo(Items).pointer.child;
+                            try @field(result, field.name).append(try self.parseValue(
+                                Item,
+                                field.name,
+                                iter,
+                                &peeked,
+                            ));
+                        } else {
+                            @field(result, field.name) = try self.parseValue(
+                                field.type,
+                                field.name,
+                                iter,
+                                &peeked,
+                            );
+                        }
                     }
                 },
             }
@@ -243,7 +276,7 @@ pub const Command = struct {
         }
 
         // Make sure all non optional args were found
-        inline for (std.meta.tags(ArgEnum)) |arg| {
+        for (std.meta.tags(ArgEnum)) |arg| {
             if (args.get(arg) == null) {
                 log.err("missing required argument \"{s}\"", .{@tagName(arg)});
                 self.usageBrief();
@@ -278,7 +311,7 @@ pub const Command = struct {
     fn parseValue(
         self: @This(),
         Type: type,
-        arg_str: []const u8,
+        comptime arg_str: []const u8,
         iter: anytype,
         peeked: *?[]const u8,
     ) Error!Type {
@@ -314,8 +347,8 @@ pub const Command = struct {
                     return error.Parser;
                 };
             },
-            .pointer => |Pointer| {
-                if (Pointer.child != u8 or !Pointer.is_const) {
+            .pointer => |pointer| {
+                if (pointer.child != u8 or !pointer.is_const) {
                     unsupportedArgumentType(arg_str, Type);
                 }
                 return try self.parseValueStr(arg_str, iter, peeked);
@@ -377,7 +410,16 @@ pub const Command = struct {
         if (self.options.positional_args.len > 0) {
             try writer.writeAll("\noptions:\n");
             inline for (self.options.named_args) |arg| {
-                try writeArg(col, writer, false, arg.long, arg.short, arg.type, arg.description);
+                try writeArg(
+                    col,
+                    writer,
+                    false,
+                    arg.long,
+                    arg.short,
+                    arg.type,
+                    arg.description,
+                    arg.accum,
+                );
             }
         }
 
@@ -385,7 +427,16 @@ pub const Command = struct {
         if (self.options.positional_args.len > 0) {
             try writer.writeAll("\npositional arguments:\n");
             inline for (self.options.positional_args) |arg| {
-                try writeArg(col, writer, true, arg.meta, null, arg.type, arg.description);
+                try writeArg(
+                    col,
+                    writer,
+                    true,
+                    arg.meta,
+                    null,
+                    arg.type,
+                    arg.description,
+                    false,
+                );
             }
         }
     }
@@ -398,6 +449,7 @@ pub const Command = struct {
         short: ?u8,
         T: ?type,
         description: ?[]const u8,
+        accum: bool,
     ) !void {
         // Get the inner type if optional
         const Inner: ?type = if (T) |Some| switch (@typeInfo(Some)) {
@@ -419,6 +471,10 @@ pub const Command = struct {
             break :b std.fmt.count(lhs_fmt, lhs_args);
         };
 
+        if (accum) {
+            try writer.print(" (accum)", .{});
+        }
+
         // Write the help message offset by the correct number of characters
         if (description) |desc| {
             if (std.math.sub(usize, col, count) catch null) |padding| {
@@ -438,9 +494,9 @@ pub const Command = struct {
             }
         }
 
-        // If we're optional or a boolean, display the "no-" variant
-        if (Inner != T or Inner == bool) {
-            try writeArg(col, writer, positional, "no-" ++ long, short, null, null);
+        // If we're optional, a boolean, or a list, display the "no-" variant
+        if (Inner != T or Inner == bool or accum) {
+            try writer.print("  --no-{s}\n", .{long});
         }
     }
 
@@ -503,6 +559,7 @@ pub const NamedArg = struct {
     description: ?[:0]const u8,
     type: type,
     default: ?*const anyopaque,
+    accum: bool = false,
 
     pub fn Options(Type: type) type {
         return struct {
@@ -514,8 +571,15 @@ pub const NamedArg = struct {
                 required: void,
                 value: Type,
             } = .required,
+            accum: bool = false,
         };
     }
+
+    pub const AccumOptions = struct {
+        long: [:0]const u8,
+        short: ?u8 = null,
+        description: ?[:0]const u8 = null,
+    };
 
     pub fn init(Type: type, options: Options(Type)) @This() {
         // The user could do this directly, but it is tricky to set default correctly--not only is
@@ -530,6 +594,20 @@ pub const NamedArg = struct {
                 .required => null,
                 .value => |v| @ptrCast(&v),
             },
+            .accum = false,
+        };
+    }
+
+    pub fn initAccum(Type: type, options: AccumOptions) @This() {
+        // For now, we don't support the required or default options on accumulation arguments. This
+        // can be added later if there's a use for them.
+        return .{
+            .long = options.long,
+            .short = options.short,
+            .description = options.description,
+            .type = Type,
+            .accum = true,
+            .default = null,
         };
     }
 };
@@ -567,7 +645,7 @@ fn validateShortName(comptime c: u8) void {
     }
 }
 
-fn unsupportedArgumentType(arg_str: []const u8, ty: type) noreturn {
+fn unsupportedArgumentType(comptime arg_str: []const u8, ty: type) noreturn {
     @compileError(arg_str ++ ": unsupported argument type " ++ @typeName(ty));
 }
 
@@ -635,7 +713,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -660,7 +738,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--no-u32",
@@ -729,7 +807,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -754,7 +832,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -818,7 +896,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -843,7 +921,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -860,7 +938,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--no-u32",
@@ -929,7 +1007,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -954,7 +1032,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -1018,7 +1096,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1043,7 +1121,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1076,7 +1154,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u",
@@ -1097,7 +1175,7 @@ test "no args" {
     const options: Command = .{ .name = "command name" };
     const Result = options.Result();
     try expectEqual(0, std.meta.fields(Result).len);
-    try expectEqual(Result{}, try options.parseFromSlice(&.{"path"}));
+    try expectEqual(Result{}, try options.parseFromSlice(std.testing.allocator, &.{"path"}));
 }
 
 test "only positional" {
@@ -1129,7 +1207,7 @@ test "only positional" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -1172,7 +1250,7 @@ test "only named" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1201,6 +1279,9 @@ test "help menu" {
             }),
             NamedArg.init(?[]const u8, .{
                 .long = "string",
+            }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
             }),
         },
         .positional_args = &.{
@@ -1286,6 +1367,8 @@ test "help menu" {
             \\  --no-enum
             \\  --string <string>
             \\  --no-string
+            \\  --list <string> (accum)
+            \\  --no-list
             \\
             \\positional arguments:
             \\  U8 <u8>
@@ -1349,29 +1432,29 @@ test "help argument" {
         },
     };
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1379,7 +1462,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1387,7 +1470,7 @@ test "help argument" {
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1396,7 +1479,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1405,27 +1488,27 @@ test "help argument" {
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
-        "path",
-        "--named-1",
-        "foo",
-        "--named-2",
-        "bar",
-        "baz",
-        "--help",
-    }));
-
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
         "--named-2",
         "bar",
         "baz",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1436,7 +1519,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1486,4 +1569,69 @@ test "default field values" {
     try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-4").default_value.?)).*);
     try expectEqual(null, std.meta.fieldInfo(Result, .@"named-5").default_value);
     try expectEqual(null, std.meta.fieldInfo(Result, .@"POS-1").default_value);
+}
+
+test "lists" {
+    const options: Command = .{
+        .name = "command name",
+        .named_args = &.{
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+            }),
+        },
+    };
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{}, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+
+            "--no-list",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{}, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+
+            "--no-list",
+
+            "--list",
+            "baz",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{"baz"}, result.list.items);
+    }
 }
