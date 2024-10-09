@@ -406,7 +406,16 @@ pub const Command = struct {
         if (self.options.positional_args.len > 0) {
             try writer.writeAll("\noptions:\n");
             inline for (self.options.named_args) |arg| {
-                try writeArg(col, writer, false, arg.long, arg.short, arg.type, arg.description);
+                try writeArg(
+                    col,
+                    writer,
+                    false,
+                    arg.long,
+                    arg.short,
+                    arg.type,
+                    arg.description,
+                    arg.accum,
+                );
             }
         }
 
@@ -414,7 +423,16 @@ pub const Command = struct {
         if (self.options.positional_args.len > 0) {
             try writer.writeAll("\npositional arguments:\n");
             inline for (self.options.positional_args) |arg| {
-                try writeArg(col, writer, true, arg.meta, null, arg.type, arg.description);
+                try writeArg(
+                    col,
+                    writer,
+                    true,
+                    arg.meta,
+                    null,
+                    arg.type,
+                    arg.description,
+                    false,
+                );
             }
         }
     }
@@ -427,6 +445,7 @@ pub const Command = struct {
         short: ?u8,
         T: ?type,
         description: ?[]const u8,
+        accum: bool,
     ) !void {
         // Get the inner type if optional
         const Inner: ?type = if (T) |Some| switch (@typeInfo(Some)) {
@@ -448,6 +467,10 @@ pub const Command = struct {
             break :b std.fmt.count(lhs_fmt, lhs_args);
         };
 
+        if (accum) {
+            try writer.print(" (accum)", .{});
+        }
+
         // Write the help message offset by the correct number of characters
         if (description) |desc| {
             if (std.math.sub(usize, col, count) catch null) |padding| {
@@ -467,9 +490,9 @@ pub const Command = struct {
             }
         }
 
-        // If we're optional or a boolean, display the "no-" variant
-        if (Inner != T or Inner == bool) {
-            try writeArg(col, writer, positional, "no-" ++ long, short, null, null);
+        // If we're optional, a boolean, or a list, display the "no-" variant
+        if (Inner != T or Inner == bool or accum) {
+            try writer.print("  --no-{s}\n", .{long});
         }
     }
 
@@ -1253,6 +1276,9 @@ test "help menu" {
             NamedArg.init(?[]const u8, .{
                 .long = "string",
             }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -1337,6 +1363,8 @@ test "help menu" {
             \\  --no-enum
             \\  --string <string>
             \\  --no-string
+            \\  --list <string> (accum)
+            \\  --no-list
             \\
             \\positional arguments:
             \\  U8 <u8>
