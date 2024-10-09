@@ -211,7 +211,7 @@ pub const Command = struct {
                         var peeked: ?[]const u8 = null;
                         @field(result, field.name) = try self.parseValue(
                             field.type,
-                            arg_str,
+                            field.name,
                             iter,
                             &peeked,
                         );
@@ -278,7 +278,7 @@ pub const Command = struct {
     fn parseValue(
         self: @This(),
         Type: type,
-        arg_str: []const u8,
+        comptime arg_str: []const u8,
         iter: anytype,
         peeked: *?[]const u8,
     ) Error!Type {
@@ -567,7 +567,7 @@ fn validateShortName(comptime c: u8) void {
     }
 }
 
-fn unsupportedArgumentType(arg_str: []const u8, ty: type) noreturn {
+fn unsupportedArgumentType(comptime arg_str: []const u8, ty: type) noreturn {
     @compileError(arg_str ++ ": unsupported argument type " ++ @typeName(ty));
 }
 
