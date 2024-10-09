@@ -5,9 +5,10 @@ const FieldEnum = std.meta.FieldEnum;
 const log = std.log.scoped(.structopt);
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
+const expectEqualSlices = std.testing.expectEqualSlices;
 const expectError = std.testing.expectError;
 
-pub const Error = error{ Parser, Help };
+pub const Error = error{ OutOfMemory, Parser, Help };
 
 pub const Command = struct {
     const Self = @This();
@@ -30,12 +31,13 @@ pub const Command = struct {
             }
             validateLongName(arg.long);
             if (arg.short) |short| validateShortName(short);
+            const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
             fields[i] = .{
                 .name = arg.long,
-                .type = arg.type,
+                .type = T,
                 .default_value = arg.default,
                 .is_comptime = false,
-                .alignment = @alignOf(arg.type),
+                .alignment = @alignOf(T),
             };
         }
 
@@ -100,7 +102,7 @@ pub const Command = struct {
     }
 
     /// Parse the given commands (for testing purposes)
-    fn parseFromSlice(self: @This(), args: []const []const u8) Error!self.Result() {
+    fn parseFromSlice(self: @This(), gpa: Allocator, args: []const []const u8) Error!self.Result() {
         const Iter = struct {
             slice: []const []const u8,
 
@@ -123,11 +125,11 @@ pub const Command = struct {
         };
 
         var iter = Iter.init(args);
-        return parseFromAnyIter(self, &iter);
+        return parseFromAnyIter(self, gpa, &iter);
     }
 
     /// Parser implementation
-    fn parseFromAnyIter(self: @This(), iter: anytype) Error!self.Result() {
+    fn parseFromAnyIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
         // Initialize result with all defaults set
         const ParsedCommand = self.Result();
         var result: ParsedCommand = undefined;
@@ -140,12 +142,17 @@ pub const Command = struct {
         // Parse the arguments
         const ArgEnum = FieldEnum(ParsedCommand);
         var args: std.EnumMap(ArgEnum, enum { positional, found }) = .{};
+        comptime var accum: std.EnumSet(ArgEnum) = .initEmpty();
         inline for (self.positional_args) |positional_arg| {
             args.put(stringToEnum(ArgEnum, positional_arg.meta).?, .positional);
         }
         inline for (self.named_args) |named_arg| {
             if (named_arg.default != null) {
                 args.put(stringToEnum(ArgEnum, named_arg.long).?, .found);
+            }
+            if (named_arg.accum) {
+                comptime accum.insert(stringToEnum(ArgEnum, named_arg.long).?);
+                @field(result, named_arg.long) = .init(gpa);
             }
         }
 
@@ -209,12 +216,23 @@ pub const Command = struct {
                         }
                     } else {
                         var peeked: ?[]const u8 = null;
-                        @field(result, field.name) = try self.parseValue(
-                            field.type,
-                            field.name,
-                            iter,
-                            &peeked,
-                        );
+                        if (comptime accum.contains(field_enum_inline)) {
+                            const Items = @TypeOf(@field(result, field.name).items);
+                            const Item = @typeInfo(Items).pointer.child;
+                            try @field(result, field.name).append(try self.parseValue(
+                                Item,
+                                field.name,
+                                iter,
+                                &peeked,
+                            ));
+                        } else {
+                            @field(result, field.name) = try self.parseValue(
+                                field.type,
+                                field.name,
+                                iter,
+                                &peeked,
+                            );
+                        }
                     }
                 },
             }
@@ -314,8 +332,8 @@ pub const Command = struct {
                     return error.Parser;
                 };
             },
-            .pointer => |Pointer| {
-                if (Pointer.child != u8 or !Pointer.is_const) {
+            .pointer => |pointer| {
+                if (pointer.child != u8 or !pointer.is_const) {
                     unsupportedArgumentType(arg_str, Type);
                 }
                 return try self.parseValueStr(arg_str, iter, peeked);
@@ -503,6 +521,7 @@ pub const NamedArg = struct {
     description: ?[:0]const u8,
     type: type,
     default: ?*const anyopaque,
+    accum: bool = false,
 
     pub fn Options(Type: type) type {
         return struct {
@@ -514,6 +533,7 @@ pub const NamedArg = struct {
                 required: void,
                 value: Type,
             } = .required,
+            accum: bool = false,
         };
     }
 
@@ -530,6 +550,7 @@ pub const NamedArg = struct {
                 .required => null,
                 .value => |v| @ptrCast(&v),
             },
+            .accum = options.accum,
         };
     }
 };
@@ -635,7 +656,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -660,7 +681,7 @@ test "all types nullable required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--no-u32",
@@ -729,7 +750,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -754,7 +775,7 @@ test "all types defaults" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -818,7 +839,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -843,7 +864,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -860,7 +881,7 @@ test "all types defaults and nullable but not null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--no-u32",
@@ -929,7 +950,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -954,7 +975,7 @@ test "all types defaults and nullable and null" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -1018,7 +1039,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1043,7 +1064,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1076,7 +1097,7 @@ test "all types required" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u",
@@ -1097,7 +1118,7 @@ test "no args" {
     const options: Command = .{ .name = "command name" };
     const Result = options.Result();
     try expectEqual(0, std.meta.fields(Result).len);
-    try expectEqual(Result{}, try options.parseFromSlice(&.{"path"}));
+    try expectEqual(Result{}, try options.parseFromSlice(std.testing.allocator, &.{"path"}));
 }
 
 test "only positional" {
@@ -1129,7 +1150,7 @@ test "only positional" {
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
@@ -1172,7 +1193,7 @@ test "only named" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
-    }, try options.parseFromSlice(&.{
+    }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "--u32",
@@ -1349,29 +1370,29 @@ test "help argument" {
         },
     };
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1379,7 +1400,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1387,7 +1408,7 @@ test "help argument" {
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1396,7 +1417,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1405,27 +1426,27 @@ test "help argument" {
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
-        "path",
-        "--named-1",
-        "foo",
-        "--named-2",
-        "bar",
-        "baz",
-        "--help",
-    }));
-
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
         "--named-2",
         "bar",
         "baz",
+        "--help",
+    }));
+
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+        "--named-1",
+        "foo",
+        "--named-2",
+        "bar",
+        "baz",
         "-h",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1436,7 +1457,7 @@ test "help argument" {
         "--help",
     }));
 
-    try expectError(error.Help, options.parseFromSlice(&.{
+    try expectError(error.Help, options.parseFromSlice(std.testing.allocator, &.{
         "path",
         "--named-1",
         "foo",
@@ -1486,4 +1507,26 @@ test "default field values" {
     try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-4").default_value.?)).*);
     try expectEqual(null, std.meta.fieldInfo(Result, .@"named-5").default_value);
     try expectEqual(null, std.meta.fieldInfo(Result, .@"POS-1").default_value);
+}
+
+test "lists" {
+    const options: Command = .{
+        .name = "command name",
+        .named_args = &.{
+            NamedArg.init([]const u8, .{
+                .long = "list",
+                .accum = true,
+            }),
+        },
+    };
+    const result = try options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+
+        "--list",
+        "foo",
+        "--list",
+        "bar",
+    });
+    defer result.list.deinit();
+    try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
 }
