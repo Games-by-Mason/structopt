@@ -218,6 +218,8 @@ pub const Command = struct {
                             @field(result, field.name) = false;
                         } else if (@typeInfo(field.type) == .optional) {
                             @field(result, field.name) = null;
+                        } else if (comptime accum.contains(field_enum_inline)) {
+                            @field(result, field.name).clearRetainingCapacity();
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
                             self.usageBrief();
@@ -1566,5 +1568,38 @@ test "lists" {
         });
         defer options.parseFree(result);
         try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+
+            "--no-list",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{}, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+
+            "--no-list",
+
+            "--list",
+            "baz",
+        });
+        defer options.parseFree(result);
+        try expectEqualSlices([]const u8, &.{"baz"}, result.list.items);
     }
 }

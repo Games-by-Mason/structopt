@@ -4,6 +4,4 @@ This is the argument parser I use in my engine and various supporting tools. It'
 
 # WIP array args
 - support --name arg --name arg as well as --name arg arg?
-- make sure not to allow as positional args
 - test help menu and stuff, look at all existing tests
-- support -no-... to clear
