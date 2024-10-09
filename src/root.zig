@@ -67,6 +67,15 @@ pub const Command = struct {
         } });
     }
 
+    /// Frees the parsed result. Only necessary if lists are used.
+    pub fn parseFree(comptime self: @This(), result: self.Result()) void {
+        inline for (self.named_args) |named_arg| {
+            if (named_arg.accum) {
+                @field(result, named_arg.long).deinit();
+            }
+        }
+    }
+
     /// Show the help menu
     pub fn usageBrief(self: @This()) void {
         self.usageImpl(true);
@@ -1542,7 +1551,7 @@ test "lists" {
         const result = try options.parseFromSlice(std.testing.allocator, &.{
             "path",
         });
-        defer result.list.deinit();
+        defer options.parseFree(result);
         try expectEqualSlices([]const u8, &.{}, result.list.items);
     }
 
@@ -1555,7 +1564,7 @@ test "lists" {
             "--list",
             "bar",
         });
-        defer result.list.deinit();
+        defer options.parseFree(result);
         try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
     }
 }
