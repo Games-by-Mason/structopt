@@ -29,6 +29,9 @@ pub const Command = struct {
             if (arg.type == ?bool) {
                 @compileError(arg.long ++ ": booleans cannot be nullable");
             }
+            if (@typeInfo(arg.type) == .optional and arg.accum) {
+                @compileError(arg.long ++ ": accum arguments cannot be nullable");
+            }
             validateLongName(arg.long);
             if (arg.short) |short| validateShortName(short);
             const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
@@ -89,11 +92,12 @@ pub const Command = struct {
         log.info("{}", .{self.fmtUsage(brief)});
     }
 
-    /// Parse the command line arguments for this process, exit on help or failure.
-    pub fn parseOrExit(self: @This(), iter: *std.process.ArgIterator) self.Result() {
-        return self.parse(iter) catch |err| switch (err) {
+    /// Parse the command line arguments for this process, exit on help or failure. Panics on OOM.
+    pub fn parseOrExit(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) self.Result() {
+        return self.parse(gpa, iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
+            error.OutOfMemory => @panic("OOM"),
         };
     }
 
@@ -106,8 +110,8 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process
-    pub fn parse(self: @This(), iter: *std.process.ArgIterator) Error!self.Result() {
-        return parseFromAnyIter(self, &iter);
+    pub fn parse(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) Error!self.Result() {
+        return self.parseFromAnyIter(gpa, &iter);
     }
 
     /// Parse the given commands (for testing purposes)
@@ -134,7 +138,7 @@ pub const Command = struct {
         };
 
         var iter = Iter.init(args);
-        return parseFromAnyIter(self, gpa, &iter);
+        return self.parseFromAnyIter(gpa, &iter);
     }
 
     /// Parser implementation
@@ -272,7 +276,7 @@ pub const Command = struct {
         }
 
         // Make sure all non optional args were found
-        inline for (std.meta.tags(ArgEnum)) |arg| {
+        for (std.meta.tags(ArgEnum)) |arg| {
             if (args.get(arg) == null) {
                 log.err("missing required argument \"{s}\"", .{@tagName(arg)});
                 self.usageBrief();
