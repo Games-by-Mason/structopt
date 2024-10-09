@@ -147,7 +147,7 @@ pub const Command = struct {
             args.put(stringToEnum(ArgEnum, positional_arg.meta).?, .positional);
         }
         inline for (self.named_args) |named_arg| {
-            if (named_arg.default != null) {
+            if (named_arg.default != null or named_arg.accum) {
                 args.put(stringToEnum(ArgEnum, named_arg.long).?, .found);
             }
             if (named_arg.accum) {
@@ -537,6 +537,12 @@ pub const NamedArg = struct {
         };
     }
 
+    pub const AccumOptions = struct {
+        long: [:0]const u8,
+        short: ?u8 = null,
+        description: ?[:0]const u8 = null,
+    };
+
     pub fn init(Type: type, options: Options(Type)) @This() {
         // The user could do this directly, but it is tricky to set default correctly--not only is
         // the address of and pointer cast necessary giving up type safety, null is a valid default
@@ -550,7 +556,20 @@ pub const NamedArg = struct {
                 .required => null,
                 .value => |v| @ptrCast(&v),
             },
-            .accum = options.accum,
+            .accum = false,
+        };
+    }
+
+    pub fn initAccum(Type: type, options: AccumOptions) @This() {
+        // For now, we don't support the required or default options on accumulation arguments. This
+        // can be added later if there's a use for them.
+        return .{
+            .long = options.long,
+            .short = options.short,
+            .description = options.description,
+            .type = Type,
+            .accum = true,
+            .default = null,
         };
     }
 };
@@ -1513,20 +1532,30 @@ test "lists" {
     const options: Command = .{
         .name = "command name",
         .named_args = &.{
-            NamedArg.init([]const u8, .{
+            NamedArg.initAccum([]const u8, .{
                 .long = "list",
-                .accum = true,
             }),
         },
     };
-    const result = try options.parseFromSlice(std.testing.allocator, &.{
-        "path",
 
-        "--list",
-        "foo",
-        "--list",
-        "bar",
-    });
-    defer result.list.deinit();
-    try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+        });
+        defer result.list.deinit();
+        try expectEqualSlices([]const u8, &.{}, result.list.items);
+    }
+
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "path",
+
+            "--list",
+            "foo",
+            "--list",
+            "bar",
+        });
+        defer result.list.deinit();
+        try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
+    }
 }
