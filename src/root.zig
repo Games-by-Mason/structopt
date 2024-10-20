@@ -397,9 +397,11 @@ pub const Command = struct {
         const col = 25;
 
         // Brief
-        try writer.print("usage: {s}", .{self.options.name});
-        if (self.brief) return;
-        try writer.writeAll("\n");
+        try writer.print("usage: {s}\n", .{self.options.name});
+        if (self.brief) {
+            try writer.print("--help for more info", .{});
+            return;
+        }
 
         // Help message
         if (self.options.description) |description| {
