@@ -407,7 +407,7 @@ pub const Command = struct {
         }
 
         // Named args
-        if (self.options.positional_args.len > 0) {
+        if (self.options.named_args.len > 0) {
             try writer.writeAll("\noptions:\n");
             inline for (self.options.named_args) |arg| {
                 try writeArg(
