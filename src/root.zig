@@ -409,7 +409,7 @@ pub const Command = struct {
         _ = options;
 
         // At what column to start help
-        const col = 25;
+        const col = 50;
 
         // Brief
         try writer.print("usage: {s}\n", .{self.options.name});
@@ -436,6 +436,7 @@ pub const Command = struct {
                     arg.type,
                     arg.description,
                     arg.accum,
+                    arg.default,
                 );
             }
         }
@@ -453,6 +454,7 @@ pub const Command = struct {
                     arg.type,
                     arg.description,
                     false,
+                    null,
                 );
             }
         }
@@ -464,32 +466,61 @@ pub const Command = struct {
         positional: bool,
         comptime long: []const u8,
         short: ?u8,
-        T: ?type,
+        T: type,
         description: ?[]const u8,
         accum: bool,
+        default: ?*const anyopaque,
     ) !void {
         // Get the inner type if optional
-        const Inner: ?type = if (T) |Some| switch (@typeInfo(Some)) {
+        const Inner: type = switch (@typeInfo(T)) {
             .optional => |optional| optional.child,
             else => T,
-        } else T;
+        };
 
         // Write the argument, and measure how many characters it took
-        const count = if (short) |s| b: {
+        var count = if (short) |s| b: {
             const lhs_fmt = "  -{c}, --{s}{}";
-            const lhs_args = .{ s, long, fmtType(Inner) };
+            const lhs_args = .{ s, long, fmtType(T) };
             try writer.print(lhs_fmt, lhs_args);
             break :b std.fmt.count(lhs_fmt, lhs_args);
         } else b: {
             const prefix = if (positional) "" else "--";
             const lhs_fmt = "  {s}{s}{}";
-            const lhs_args = .{ prefix, long, fmtType(Inner) };
+            const lhs_args = .{ prefix, long, fmtType(T) };
             try writer.print(lhs_fmt, lhs_args);
             break :b std.fmt.count(lhs_fmt, lhs_args);
         };
 
+        if (default) |untyped| {
+            const typed: *const T = @alignCast(@ptrCast(untyped));
+            const lhs_fmt = if (Inner == []const u8 or @typeInfo(Inner) == .@"enum") b: {
+                break :b " (={?s})";
+            } else if (@typeInfo(Inner) == .float) b: {
+                break :b " (={?d})";
+            } else b: {
+                break :b " (={?})";
+            };
+            const rhs_fmt = if (@typeInfo(Inner) == .@"enum") b: {
+                if (Inner != T) {
+                    if (typed.*) |some| {
+                        break :b .{@tagName(some)};
+                    } else {
+                        break :b .{"null"};
+                    }
+                } else {
+                    break :b .{@tagName(typed.*)};
+                }
+            } else b: {
+                break :b .{typed.*};
+            };
+            count += std.fmt.count(lhs_fmt, rhs_fmt);
+            try writer.print(lhs_fmt, rhs_fmt);
+        }
+
         if (accum) {
-            try writer.print(" (accum)", .{});
+            const str = " (accum)";
+            count += str.len;
+            try writer.print(str, .{});
         }
 
         // Write the help message offset by the correct number of characters
@@ -502,12 +533,10 @@ pub const Command = struct {
         try writer.writeByte('\n');
 
         // If we're an enum, list all the options
-        if (Inner) |Some| {
-            if (@typeInfo(Some) == .@"enum") {
-                for (std.meta.fieldNames(Some)) |name| {
-                    try writer.writeByteNTimes(' ', if (positional) 4 else 6);
-                    try writer.print("{s}\n", .{name});
-                }
+        if (@typeInfo(Inner) == .@"enum") {
+            for (std.meta.fieldNames(Inner)) |name| {
+                try writer.writeByteNTimes(' ', if (positional) 4 else 6);
+                try writer.print("{s}\n", .{name});
             }
         }
 
@@ -518,19 +547,23 @@ pub const Command = struct {
     }
 
     fn formatType(
-        T: ?type,
+        T: type,
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
         _ = fmt;
         _ = options;
-        const Some = T orelse return;
-        switch (@typeInfo(Some)) {
+        const Inner = switch (@typeInfo(T)) {
+            .optional => |optional| optional.child,
+            else => T,
+        };
+        const optional = if (Inner != T) "?" else "";
+        switch (@typeInfo(Inner)) {
             .bool => {},
-            .int, .float => try writer.print(" <{s}>", .{@typeName(Some)}),
-            .@"enum" => {},
-            .pointer => try writer.writeAll(" <string>"),
+            .int, .float => try writer.print(" <{s}{s}>", .{ optional, @typeName(Inner) }),
+            .@"enum" => if (optional.len > 0) try writer.print(" {s}", .{optional}),
+            .pointer => try writer.print(" <{s}string>", .{optional}),
             else => unreachable,
         }
     }
@@ -544,7 +577,7 @@ pub const Command = struct {
         return .{ .data = .{ .options = self, .brief = brief } };
     }
 
-    fn fmtType(T: ?type) std.fmt.Formatter(formatType) {
+    fn fmtType(T: type) std.fmt.Formatter(formatType) {
         return .{ .data = T };
     }
 };
@@ -1480,6 +1513,168 @@ test "help menu" {
         },
     };
 
+    const with_help_with_defaults_optional: Command = .{
+        .name = "command name",
+        .description = "command help",
+        .named_args = &.{
+            NamedArg.init(bool, .{
+                .long = "bool",
+                .description = "bool help",
+                .default = .{ .value = true },
+            }),
+            NamedArg.init(?u32, .{
+                .long = "u32",
+                .description = "u32 help",
+                .default = .{ .value = 10 },
+            }),
+            NamedArg.init(?Enum, .{
+                .long = "enum",
+                .description = "enum help",
+                .default = .{ .value = .foo },
+            }),
+            NamedArg.init(?[]const u8, .{
+                .long = "string",
+                .description = "string help",
+                .default = .{ .value = "foo" },
+            }),
+            NamedArg.init(?f32, .{
+                .long = "float",
+                .description = "float help",
+                .default = .{ .value = 1.5 },
+            }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+                .description = "string list help",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "U8",
+                .description = "u8 help",
+            }),
+            PositionalArg.init([]const u8, .{
+                .meta = "STRING",
+                .description = "string help",
+            }),
+            PositionalArg.init(Enum, .{
+                .meta = "ENUM",
+                .description = "enum help",
+            }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+                .description = "f32 help",
+            }),
+        },
+    };
+
+    const with_help_with_defaults_optional_null: Command = .{
+        .name = "command name",
+        .description = "command help",
+        .named_args = &.{
+            NamedArg.init(bool, .{
+                .long = "bool",
+                .description = "bool help",
+                .default = .{ .value = true },
+            }),
+            NamedArg.init(?u32, .{
+                .long = "u32",
+                .description = "u32 help",
+                .default = .{ .value = null },
+            }),
+            NamedArg.init(?Enum, .{
+                .long = "enum",
+                .description = "enum help",
+                .default = .{ .value = null },
+            }),
+            NamedArg.init(?[]const u8, .{
+                .long = "string",
+                .description = "string help",
+                .default = .{ .value = null },
+            }),
+            NamedArg.init(?f32, .{
+                .long = "float",
+                .description = "float help",
+                .default = .{ .value = null },
+            }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+                .description = "string list help",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "U8",
+                .description = "u8 help",
+            }),
+            PositionalArg.init([]const u8, .{
+                .meta = "STRING",
+                .description = "string help",
+            }),
+            PositionalArg.init(Enum, .{
+                .meta = "ENUM",
+                .description = "enum help",
+            }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+                .description = "f32 help",
+            }),
+        },
+    };
+
+    const with_help_with_defaults: Command = .{
+        .name = "command name",
+        .description = "command help",
+        .named_args = &.{
+            NamedArg.init(bool, .{
+                .long = "bool",
+                .description = "bool help",
+                .default = .{ .value = true },
+            }),
+            NamedArg.init(?u32, .{
+                .long = "u32",
+                .description = "u32 help",
+                .default = .{ .value = 10 },
+            }),
+            NamedArg.init(?Enum, .{
+                .long = "enum",
+                .description = "enum help",
+                .default = .{ .value = .foo },
+            }),
+            NamedArg.init(?[]const u8, .{
+                .long = "string",
+                .description = "string help",
+                .default = .{ .value = "foo" },
+            }),
+            NamedArg.init(?f32, .{
+                .long = "float",
+                .description = "float help",
+                .default = .{ .value = 1.5 },
+            }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+                .description = "string list help",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "U8",
+                .description = "u8 help",
+            }),
+            PositionalArg.init([]const u8, .{
+                .meta = "STRING",
+                .description = "string help",
+            }),
+            PositionalArg.init(Enum, .{
+                .meta = "ENUM",
+                .description = "enum help",
+            }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+                .description = "f32 help",
+            }),
+        },
+    };
+
     {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{no_help.fmtUsage(true)});
         defer std.testing.allocator.free(found);
@@ -1507,15 +1702,15 @@ test "help menu" {
             \\options:
             \\  --bool
             \\  --no-bool
-            \\  --u32 <u32>
+            \\  --u32 <?u32>
             \\  --no-u32
-            \\  --enum
+            \\  --enum ?
             \\      foo
             \\      bar
             \\  --no-enum
-            \\  --string <string>
+            \\  --string <?string>
             \\  --no-string
-            \\  --float <f32>
+            \\  --float <?f32>
             \\  --no-float
             \\  --list <string> (accum)
             \\  --no-list
@@ -1540,28 +1735,133 @@ test "help menu" {
             \\command help
             \\
             \\options:
-            \\  --bool                 bool help
+            \\  --bool                                          bool help
             \\  --no-bool
-            \\  --u32 <u32>            u32 help
+            \\  --u32 <?u32>                                    u32 help
             \\  --no-u32
-            \\  --enum                 enum help
+            \\  --enum ?                                        enum help
             \\      foo
             \\      bar
             \\  --no-enum
-            \\  --string <string>      string help
+            \\  --string <?string>                              string help
             \\  --no-string
-            \\  --float <f32>          float help
+            \\  --float <?f32>                                  float help
             \\  --no-float
-            \\  --list <string> (accum)        string list help
+            \\  --list <string> (accum)                         string list help
             \\  --no-list
             \\
             \\positional arguments:
-            \\  U8 <u8>                u8 help
-            \\  STRING <string>        string help
-            \\  ENUM                   enum help
+            \\  U8 <u8>                                         u8 help
+            \\  STRING <string>                                 string help
+            \\  ENUM                                            enum help
             \\    foo
             \\    bar
-            \\  F32 <f32>              f32 help
+            \\  F32 <f32>                                       f32 help
+            \\
+        , found);
+    }
+
+    {
+        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional.fmtUsage(false)});
+        defer std.testing.allocator.free(found);
+        try expectEqualStrings(
+            \\usage: command name
+            \\
+            \\command help
+            \\
+            \\options:
+            \\  --bool (=true)                                  bool help
+            \\  --no-bool
+            \\  --u32 <?u32> (=10)                              u32 help
+            \\  --no-u32
+            \\  --enum ? (=foo)                                 enum help
+            \\      foo
+            \\      bar
+            \\  --no-enum
+            \\  --string <?string> (=foo)                       string help
+            \\  --no-string
+            \\  --float <?f32> (=1.5)                           float help
+            \\  --no-float
+            \\  --list <string> (accum)                         string list help
+            \\  --no-list
+            \\
+            \\positional arguments:
+            \\  U8 <u8>                                         u8 help
+            \\  STRING <string>                                 string help
+            \\  ENUM                                            enum help
+            \\    foo
+            \\    bar
+            \\  F32 <f32>                                       f32 help
+            \\
+        , found);
+    }
+
+    {
+        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional_null.fmtUsage(false)});
+        defer std.testing.allocator.free(found);
+        try expectEqualStrings(
+            \\usage: command name
+            \\
+            \\command help
+            \\
+            \\options:
+            \\  --bool (=true)                                  bool help
+            \\  --no-bool
+            \\  --u32 <?u32> (=null)                            u32 help
+            \\  --no-u32
+            \\  --enum ? (=null)                                enum help
+            \\      foo
+            \\      bar
+            \\  --no-enum
+            \\  --string <?string> (=null)                      string help
+            \\  --no-string
+            \\  --float <?f32> (=null)                          float help
+            \\  --no-float
+            \\  --list <string> (accum)                         string list help
+            \\  --no-list
+            \\
+            \\positional arguments:
+            \\  U8 <u8>                                         u8 help
+            \\  STRING <string>                                 string help
+            \\  ENUM                                            enum help
+            \\    foo
+            \\    bar
+            \\  F32 <f32>                                       f32 help
+            \\
+        , found);
+    }
+
+    {
+        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults.fmtUsage(false)});
+        defer std.testing.allocator.free(found);
+        try expectEqualStrings(
+            \\usage: command name
+            \\
+            \\command help
+            \\
+            \\options:
+            \\  --bool (=true)                                  bool help
+            \\  --no-bool
+            \\  --u32 <?u32> (=10)                              u32 help
+            \\  --no-u32
+            \\  --enum ? (=foo)                                 enum help
+            \\      foo
+            \\      bar
+            \\  --no-enum
+            \\  --string <?string> (=foo)                       string help
+            \\  --no-string
+            \\  --float <?f32> (=1.5)                           float help
+            \\  --no-float
+            \\  --list <string> (accum)                         string list help
+            \\  --no-list
+            \\
+            \\positional arguments:
+            \\  U8 <u8>                                         u8 help
+            \\  STRING <string>                                 string help
+            \\  ENUM                                            enum help
+            \\    foo
+            \\    bar
+            \\  F32 <f32>                                       f32 help
             \\
         , found);
     }
