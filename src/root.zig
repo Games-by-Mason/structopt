@@ -214,7 +214,7 @@ pub const Command = struct {
             // Parse the argument value
             switch (field_enum) {
                 inline else => |field_enum_inline| {
-                    const field = std.meta.fieldInfo(ParsedCommand, field_enum_inline);
+                    const field = @typeInfo(ParsedCommand).@"struct".fields[@intFromEnum(field_enum_inline)];
                     if (negated) {
                         if (field.type == bool) {
                             @field(result, field.name) = false;
