@@ -350,6 +350,18 @@ pub const Command = struct {
                     return error.Parser;
                 };
             },
+            .float => {
+                const value_str = try self.parseValueStr(arg_str, iter, peeked);
+                return std.fmt.parseFloat(Inner, value_str) catch {
+                    log.err("{s}: expected {}, found \"{s}\"", .{
+                        arg_str,
+                        Inner,
+                        value_str,
+                    });
+                    self.usageBrief();
+                    return error.Parser;
+                };
+            },
             .pointer => |pointer| {
                 if (pointer.child != u8 or !pointer.is_const) {
                     unsupportedArgumentType(arg_str, Type);
@@ -684,6 +696,9 @@ test "all types nullable required" {
             NamedArg.init(?[]const u8, .{
                 .long = "string",
             }),
+            NamedArg.init(?f32, .{
+                .long = "f32",
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -695,19 +710,24 @@ test "all types nullable required" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(7, std.meta.fields(Result).len);
+    try expectEqual(9, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(?u32, @TypeOf(undef.u32));
     try expectEqual(?Enum, @TypeOf(undef.@"enum"));
     try expectEqual(?[]const u8, @TypeOf(undef.string));
+    try expectEqual(?f32, @TypeOf(undef.f32));
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
@@ -715,9 +735,11 @@ test "all types nullable required" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -728,10 +750,13 @@ test "all types nullable required" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // All null
@@ -740,9 +765,11 @@ test "all types nullable required" {
         .u32 = null,
         .@"enum" = null,
         .string = null,
+        .f32 = null,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 10.1,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -750,10 +777,12 @@ test "all types nullable required" {
         "--no-enum",
         "--no-string",
         "--no-bool",
+        "--no-f32",
 
         "1",
         "hello",
         "foo",
+        "10.1",
     }));
 }
 
@@ -778,6 +807,10 @@ test "all types defaults" {
                 .long = "string",
                 .default = .{ .value = "default" },
             }),
+            NamedArg.init(f32, .{
+                .long = "f32",
+                .default = .{ .value = 123.456 },
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -789,19 +822,24 @@ test "all types defaults" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(7, std.meta.fields(Result).len);
+    try expectEqual(9, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(u32, @TypeOf(undef.u32));
     try expectEqual(Enum, @TypeOf(undef.@"enum"));
     try expectEqual([]const u8, @TypeOf(undef.string));
+    try expectEqual(f32, @TypeOf(undef.f32));
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
@@ -809,9 +847,11 @@ test "all types defaults" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -822,10 +862,13 @@ test "all types defaults" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // All skipped
@@ -834,15 +877,18 @@ test "all types defaults" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "default",
+        .f32 = 123.456,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 5.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
         "hello",
         "foo",
+        "5.5",
     }));
 }
 
@@ -867,6 +913,10 @@ test "all types defaults and nullable but not null" {
                 .long = "string",
                 .default = .{ .value = "default" },
             }),
+            NamedArg.init(?f32, .{
+                .long = "f32",
+                .default = .{ .value = 123.456 },
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -878,19 +928,24 @@ test "all types defaults and nullable but not null" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(7, std.meta.fields(Result).len);
+    try expectEqual(9, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(?u32, @TypeOf(undef.u32));
     try expectEqual(?Enum, @TypeOf(undef.@"enum"));
     try expectEqual(?[]const u8, @TypeOf(undef.string));
+    try expectEqual(?f32, @TypeOf(undef.f32));
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
@@ -898,9 +953,11 @@ test "all types defaults and nullable but not null" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -911,10 +968,13 @@ test "all types defaults and nullable but not null" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // All skipped
@@ -923,15 +983,18 @@ test "all types defaults and nullable but not null" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "default",
+        .f32 = 123.456,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // All null
@@ -940,9 +1003,11 @@ test "all types defaults and nullable but not null" {
         .u32 = null,
         .@"enum" = null,
         .string = null,
+        .f32 = null,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -950,10 +1015,12 @@ test "all types defaults and nullable but not null" {
         "--no-enum",
         "--no-string",
         "--no-bool",
+        "--no-f32",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 }
 
@@ -978,6 +1045,10 @@ test "all types defaults and nullable and null" {
                 .long = "string",
                 .default = .{ .value = null },
             }),
+            NamedArg.init(?f32, .{
+                .long = "f32",
+                .default = .{ .value = null },
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -989,19 +1060,24 @@ test "all types defaults and nullable and null" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(7, std.meta.fields(Result).len);
+    try expectEqual(9, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(?u32, @TypeOf(undef.u32));
     try expectEqual(?Enum, @TypeOf(undef.@"enum"));
     try expectEqual(?[]const u8, @TypeOf(undef.string));
+    try expectEqual(?f32, @TypeOf(undef.f32));
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
@@ -1009,9 +1085,11 @@ test "all types defaults and nullable and null" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1022,10 +1100,13 @@ test "all types defaults and nullable and null" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // All skipped
@@ -1034,15 +1115,18 @@ test "all types defaults and nullable and null" {
         .u32 = null,
         .@"enum" = null,
         .string = null,
+        .f32 = null,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 }
 
@@ -1067,6 +1151,10 @@ test "all types required" {
                 .long = "string",
                 .short = 's',
             }),
+            NamedArg.init(f32, .{
+                .long = "f32",
+                .short = 'f',
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -1078,19 +1166,24 @@ test "all types required" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(7, std.meta.fields(Result).len);
+    try expectEqual(9, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(u32, @TypeOf(undef.u32));
     try expectEqual(Enum, @TypeOf(undef.@"enum"));
     try expectEqual([]const u8, @TypeOf(undef.string));
+    try expectEqual(f32, @TypeOf(undef.f32));
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
@@ -1098,9 +1191,11 @@ test "all types required" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1111,10 +1206,13 @@ test "all types required" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // Repeated args
@@ -1123,9 +1221,11 @@ test "all types required" {
         .u32 = 321,
         .@"enum" = .foo,
         .string = "updated",
+        .f32 = 3.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1136,6 +1236,8 @@ test "all types required" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
 
         "--u32",
         "321",
@@ -1144,10 +1246,13 @@ test "all types required" {
         "--string",
         "updated",
         "--no-bool",
+        "--f32",
+        "3.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 
     // Short names args
@@ -1156,9 +1261,11 @@ test "all types required" {
         .u32 = 321,
         .@"enum" = .foo,
         .string = "updated",
+        .f32 = 1.5,
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 2.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1169,10 +1276,13 @@ test "all types required" {
         "-s",
         "updated",
         "-b",
+        "-f",
+        "1.5",
 
         "1",
         "hello",
         "foo",
+        "2.5",
     }));
 }
 
@@ -1197,27 +1307,33 @@ test "only positional" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
             }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(3, std.meta.fields(Result).len);
+    try expectEqual(4, std.meta.fields(Result).len);
     try expectEqual(u8, @TypeOf(undef.U8));
     try expectEqual([]const u8, @TypeOf(undef.STRING));
     try expectEqual(Enum, @TypeOf(undef.ENUM));
+    try expectEqual(f32, @TypeOf(undef.F32));
 
     // All set
     try expectEqual(Result{
         .U8 = 1,
         .STRING = "hello",
         .ENUM = .foo,
+        .F32 = 1.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
         "1",
         "hello",
         "foo",
+        "1.5",
     }));
 }
 
@@ -1238,16 +1354,20 @@ test "only named" {
             NamedArg.init(?[]const u8, .{
                 .long = "string",
             }),
+            NamedArg.init(?f32, .{
+                .long = "f32",
+            }),
         },
     };
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(4, std.meta.fields(Result).len);
+    try expectEqual(5, std.meta.fields(Result).len);
     try expectEqual(bool, @TypeOf(undef.bool));
     try expectEqual(?u32, @TypeOf(undef.u32));
     try expectEqual(?Enum, @TypeOf(undef.@"enum"));
     try expectEqual(?[]const u8, @TypeOf(undef.string));
+    try expectEqual(?f32, @TypeOf(undef.f32));
 
     // All set
     try expectEqual(Result{
@@ -1255,6 +1375,7 @@ test "only named" {
         .u32 = 123,
         .@"enum" = .bar,
         .string = "world",
+        .f32 = 1.5,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1265,6 +1386,8 @@ test "only named" {
         "--string",
         "world",
         "--bool",
+        "--f32",
+        "1.5",
     }));
 }
 
@@ -1285,6 +1408,9 @@ test "help menu" {
             NamedArg.init(?[]const u8, .{
                 .long = "string",
             }),
+            NamedArg.init(?f32, .{
+                .long = "float",
+            }),
             NamedArg.initAccum([]const u8, .{
                 .long = "list",
             }),
@@ -1298,6 +1424,9 @@ test "help menu" {
             }),
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
+            }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
             }),
         },
     };
@@ -1322,6 +1451,14 @@ test "help menu" {
                 .long = "string",
                 .description = "string help",
             }),
+            NamedArg.init(?f32, .{
+                .long = "float",
+                .description = "float help",
+            }),
+            NamedArg.initAccum([]const u8, .{
+                .long = "list",
+                .description = "string list help",
+            }),
         },
         .positional_args = &.{
             PositionalArg.init(u8, .{
@@ -1335,6 +1472,10 @@ test "help menu" {
             PositionalArg.init(Enum, .{
                 .meta = "ENUM",
                 .description = "enum help",
+            }),
+            PositionalArg.init(f32, .{
+                .meta = "F32",
+                .description = "f32 help",
             }),
         },
     };
@@ -1374,6 +1515,8 @@ test "help menu" {
             \\  --no-enum
             \\  --string <string>
             \\  --no-string
+            \\  --float <f32>
+            \\  --no-float
             \\  --list <string> (accum)
             \\  --no-list
             \\
@@ -1383,6 +1526,7 @@ test "help menu" {
             \\  ENUM
             \\    foo
             \\    bar
+            \\  F32 <f32>
             \\
         , found);
     }
@@ -1406,6 +1550,10 @@ test "help menu" {
             \\  --no-enum
             \\  --string <string>      string help
             \\  --no-string
+            \\  --float <f32>          float help
+            \\  --no-float
+            \\  --list <string> (accum)        string list help
+            \\  --no-list
             \\
             \\positional arguments:
             \\  U8 <u8>                u8 help
@@ -1413,6 +1561,7 @@ test "help menu" {
             \\  ENUM                   enum help
             \\    foo
             \\    bar
+            \\  F32 <f32>              f32 help
             \\
         , found);
     }
