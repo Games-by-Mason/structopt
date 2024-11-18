@@ -1341,6 +1341,7 @@ test "help menu" {
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command name
+            \\--help for more info
         , found);
     }
 
@@ -1349,6 +1350,7 @@ test "help menu" {
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command name
+            \\--help for more info
         , found);
     }
 
