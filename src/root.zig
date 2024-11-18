@@ -155,7 +155,6 @@ pub const Command = struct {
         // Parse the arguments
         const ArgEnum = FieldEnum(ParsedCommand);
         var args: std.EnumMap(ArgEnum, enum { positional, found }) = .{};
-        comptime var accum: std.EnumSet(ArgEnum) = .initEmpty();
         inline for (self.positional_args) |positional_arg| {
             args.put(stringToEnum(ArgEnum, positional_arg.meta).?, .positional);
         }
@@ -164,7 +163,6 @@ pub const Command = struct {
                 args.put(stringToEnum(ArgEnum, named_arg.long).?, .found);
             }
             if (named_arg.accum) {
-                comptime accum.insert(stringToEnum(ArgEnum, named_arg.long).?);
                 @field(result, named_arg.long) = .init(gpa);
             }
         }
@@ -222,7 +220,7 @@ pub const Command = struct {
                             @field(result, field.name) = false;
                         } else if (@typeInfo(field.type) == .optional) {
                             @field(result, field.name) = null;
-                        } else if (comptime accum.contains(field_enum_inline)) {
+                        } else if (comptime self.argIsAccum(@intFromEnum(field_enum_inline))) {
                             @field(result, field.name).clearRetainingCapacity();
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
@@ -231,7 +229,7 @@ pub const Command = struct {
                         }
                     } else {
                         var peeked: ?[]const u8 = null;
-                        if (comptime accum.contains(field_enum_inline)) {
+                        if (comptime self.argIsAccum(@intFromEnum(field_enum_inline))) {
                             const Items = @TypeOf(@field(result, field.name).items);
                             const Item = @typeInfo(Items).pointer.child;
                             try @field(result, field.name).append(try self.parseValue(
@@ -285,6 +283,11 @@ pub const Command = struct {
         }
 
         return result;
+    }
+
+    fn argIsAccum(self: @This(), arg: usize) bool {
+        if (arg >= self.named_args.len) return false;
+        return self.named_args[arg].accum;
     }
 
     fn checkHelp(self: @This(), arg_str: []const u8) error{Help}!void {
