@@ -20,12 +20,8 @@ pub const Command = struct {
 
     /// The result of parsing a command
     pub fn Result(comptime self: Command) type {
-        // Allocate fields
-        const fields_len = self.positional_args.len + self.named_args.len;
-        var fields: [fields_len]std.builtin.Type.StructField = undefined;
-
-        // Add the named args
-        for (self.named_args, self.positional_args.len..fields_len) |arg, i| {
+        var named_fields: [self.named_args.len]std.builtin.Type.StructField = undefined;
+        for (self.named_args, 0..) |arg, i| {
             if (arg.type == ?bool) {
                 @compileError(arg.long ++ ": booleans cannot be nullable");
             }
@@ -35,7 +31,7 @@ pub const Command = struct {
             validateLongName(arg.long);
             if (arg.short) |short| validateShortName(short);
             const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
-            fields[i] = .{
+            named_fields[i] = .{
                 .name = arg.long,
                 .type = T,
                 .default_value = arg.default,
@@ -43,16 +39,22 @@ pub const Command = struct {
                 .alignment = @alignOf(T),
             };
         }
+        const NamedResults = @Type(.{ .@"struct" = .{
+            .layout = .auto,
+            .fields = &named_fields,
+            .decls = &.{},
+            .is_tuple = false,
+        } });
 
-        // Add the positional args
-        for (self.positional_args, 0..self.positional_args.len) |arg, i| {
+        var positional_fields: [self.positional_args.len]std.builtin.Type.StructField = undefined;
+        for (self.positional_args, 0..) |arg, i| {
             if (@typeInfo(arg.type) == .optional) {
                 @compileError(arg.meta ++ ": positional arguments cannot be nullable");
             }
             if (arg.type == bool) {
                 @compileError(arg.meta ++ ": positional arguments cannot be booleans");
             }
-            fields[i] = .{
+            positional_fields[i] = .{
                 .name = arg.meta,
                 .type = arg.type,
                 .default_value = null,
@@ -60,21 +62,26 @@ pub const Command = struct {
                 .alignment = @alignOf(arg.type),
             };
         }
-
-        // Create the type
-        return @Type(.{ .@"struct" = .{
+        const PositionalResults = @Type(.{ .@"struct" = .{
             .layout = .auto,
-            .fields = &fields,
+            .fields = &positional_fields,
             .decls = &.{},
             .is_tuple = false,
         } });
+
+        return struct {
+            pub const Named = NamedResults;
+            pub const Positional = PositionalResults;
+            named: NamedResults,
+            positional: PositionalResults,
+        };
     }
 
     /// Frees the parsed result. Only necessary if lists are used.
     pub fn parseFree(comptime self: @This(), result: self.Result()) void {
         inline for (self.named_args) |named_arg| {
             if (named_arg.accum) {
-                @field(result, named_arg.long).deinit();
+                @field(result.named, named_arg.long).deinit();
             }
         }
     }
@@ -148,22 +155,19 @@ pub const Command = struct {
         var result: ParsedCommand = undefined;
         inline for (self.named_args) |arg| {
             if (arg.default) |default| {
-                @field(result, arg.long) = @as(*const arg.type, @alignCast(@ptrCast(default))).*;
+                @field(result.named, arg.long) = @as(*const arg.type, @alignCast(@ptrCast(default))).*;
             }
         }
 
         // Parse the arguments
-        const ArgEnum = FieldEnum(ParsedCommand);
-        var args: std.EnumMap(ArgEnum, enum { positional, found }) = .{};
-        inline for (self.positional_args) |positional_arg| {
-            args.put(stringToEnum(ArgEnum, positional_arg.meta).?, .positional);
-        }
+        const NamedArgEnum = FieldEnum(ParsedCommand.Named);
+        var named_args: std.EnumSet(NamedArgEnum) = .{};
         inline for (self.named_args) |named_arg| {
             if (named_arg.default != null or named_arg.accum) {
-                args.put(stringToEnum(ArgEnum, named_arg.long).?, .found);
+                named_args.insert(stringToEnum(NamedArgEnum, named_arg.long).?);
             }
             if (named_arg.accum) {
-                @field(result, named_arg.long) = .init(gpa);
+                @field(result.named, named_arg.long) = .init(gpa);
             }
         }
 
@@ -190,38 +194,29 @@ pub const Command = struct {
                 if (lookup.len == 1) {
                     break :b getShortArgs(self).get(lookup);
                 } else {
-                    break :b stringToEnum(ArgEnum, lookup);
+                    break :b stringToEnum(NamedArgEnum, lookup);
                 }
             } orelse {
                 log.err("unexpected argument \"{s}\"", .{arg_name});
                 self.usageBrief();
                 return error.Parser;
             };
-            if (std.meta.fields(ArgEnum).len == 0) unreachable;
+            if (std.meta.fields(NamedArgEnum).len == 0) unreachable;
 
-            // Make sure the argument belongs in this section, mark it as found
-            if (args.fetchPut(field_enum, .found)) |state| {
-                switch (state) {
-                    .found => {},
-                    .positional => {
-                        log.err("unexpected argument \"{s}\"", .{arg_name});
-                        self.usageBrief();
-                        return error.Parser;
-                    },
-                }
-            }
+            // Mark this argument as found
+            named_args.insert(field_enum);
 
             // Parse the argument value
             switch (field_enum) {
                 inline else => |field_enum_inline| {
-                    const field = @typeInfo(ParsedCommand).@"struct".fields[@intFromEnum(field_enum_inline)];
+                    const field = @typeInfo(ParsedCommand.Named).@"struct".fields[@intFromEnum(field_enum_inline)];
                     if (negated) {
                         if (field.type == bool) {
-                            @field(result, field.name) = false;
+                            @field(result.named, field.name) = false;
                         } else if (@typeInfo(field.type) == .optional) {
-                            @field(result, field.name) = null;
+                            @field(result.named, field.name) = null;
                         } else if (comptime self.argIsAccum(@intFromEnum(field_enum_inline))) {
-                            @field(result, field.name).clearRetainingCapacity();
+                            @field(result.named, field.name).clearRetainingCapacity();
                         } else {
                             log.err("unexpected argument \"{s}\"", .{arg_name});
                             self.usageBrief();
@@ -230,16 +225,16 @@ pub const Command = struct {
                     } else {
                         var peeked: ?[]const u8 = null;
                         if (comptime self.argIsAccum(@intFromEnum(field_enum_inline))) {
-                            const Items = @TypeOf(@field(result, field.name).items);
+                            const Items = @TypeOf(@field(result.named, field.name).items);
                             const Item = @typeInfo(Items).pointer.child;
-                            try @field(result, field.name).append(try self.parseValue(
+                            try @field(result.named, field.name).append(try self.parseValue(
                                 Item,
                                 field.name,
                                 iter,
                                 &peeked,
                             ));
                         } else {
-                            @field(result, field.name) = try self.parseValue(
+                            @field(result.named, field.name) = try self.parseValue(
                                 field.type,
                                 field.name,
                                 iter,
@@ -259,7 +254,7 @@ pub const Command = struct {
                 iter,
                 &peeked,
             );
-            @field(result, field.meta) = value;
+            @field(result.positional, field.meta) = value;
         }
 
         // Make sure there are no remaining arguments
@@ -274,8 +269,8 @@ pub const Command = struct {
         }
 
         // Make sure all non optional args were found
-        for (std.meta.tags(ArgEnum)) |arg| {
-            if (args.get(arg) == null) {
+        for (std.meta.tags(NamedArgEnum)) |arg| {
+            if (!named_args.contains(arg)) {
                 log.err("missing required argument \"{s}\"", .{@tagName(arg)});
                 self.usageBrief();
                 return error.Parser;
@@ -297,8 +292,8 @@ pub const Command = struct {
         }
     }
 
-    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(self.Result())) {
-        const ArgEnum = FieldEnum(self.Result());
+    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(self.Result().Named)) {
+        const ArgEnum = FieldEnum(self.Result().Named);
         const max_len = self.positional_args.len + self.named_args.len;
         comptime var short_args: [max_len]struct { []const u8, ArgEnum } = undefined;
         comptime var len = 0;
@@ -751,28 +746,33 @@ test "all types nullable required" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(9, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(?u32, @TypeOf(undef.u32));
-    try expectEqual(?Enum, @TypeOf(undef.@"enum"));
-    try expectEqual(?[]const u8, @TypeOf(undef.string));
-    try expectEqual(?f32, @TypeOf(undef.f32));
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(?u32, @TypeOf(undef.named.u32));
+    try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual(?[]const u8, @TypeOf(undef.named.string));
+    try expectEqual(?f32, @TypeOf(undef.named.f32));
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -794,15 +794,19 @@ test "all types nullable required" {
 
     // All null
     try expectEqual(Result{
-        .bool = false,
-        .u32 = null,
-        .@"enum" = null,
-        .string = null,
-        .f32 = null,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 10.1,
+        .named = .{
+            .bool = false,
+            .u32 = null,
+            .@"enum" = null,
+            .string = null,
+            .f32 = null,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 10.1,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -863,28 +867,33 @@ test "all types defaults" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(9, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(u32, @TypeOf(undef.u32));
-    try expectEqual(Enum, @TypeOf(undef.@"enum"));
-    try expectEqual([]const u8, @TypeOf(undef.string));
-    try expectEqual(f32, @TypeOf(undef.f32));
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(u32, @TypeOf(undef.named.u32));
+    try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual([]const u8, @TypeOf(undef.named.string));
+    try expectEqual(f32, @TypeOf(undef.named.f32));
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -906,15 +915,19 @@ test "all types defaults" {
 
     // All skipped
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "default",
-        .f32 = 123.456,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 5.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "default",
+            .f32 = 123.456,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 5.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -969,28 +982,33 @@ test "all types defaults and nullable but not null" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(9, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(?u32, @TypeOf(undef.u32));
-    try expectEqual(?Enum, @TypeOf(undef.@"enum"));
-    try expectEqual(?[]const u8, @TypeOf(undef.string));
-    try expectEqual(?f32, @TypeOf(undef.f32));
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(?u32, @TypeOf(undef.named.u32));
+    try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual(?[]const u8, @TypeOf(undef.named.string));
+    try expectEqual(?f32, @TypeOf(undef.named.f32));
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1012,15 +1030,19 @@ test "all types defaults and nullable but not null" {
 
     // All skipped
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "default",
-        .f32 = 123.456,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "default",
+            .f32 = 123.456,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1032,15 +1054,19 @@ test "all types defaults and nullable but not null" {
 
     // All null
     try expectEqual(Result{
-        .bool = false,
-        .u32 = null,
-        .@"enum" = null,
-        .string = null,
-        .f32 = null,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = false,
+            .u32 = null,
+            .@"enum" = null,
+            .string = null,
+            .f32 = null,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1101,28 +1127,33 @@ test "all types defaults and nullable and null" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(9, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(?u32, @TypeOf(undef.u32));
-    try expectEqual(?Enum, @TypeOf(undef.@"enum"));
-    try expectEqual(?[]const u8, @TypeOf(undef.string));
-    try expectEqual(?f32, @TypeOf(undef.f32));
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(?u32, @TypeOf(undef.named.u32));
+    try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual(?[]const u8, @TypeOf(undef.named.string));
+    try expectEqual(?f32, @TypeOf(undef.named.f32));
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1144,15 +1175,19 @@ test "all types defaults and nullable and null" {
 
     // All skipped
     try expectEqual(Result{
-        .bool = false,
-        .u32 = null,
-        .@"enum" = null,
-        .string = null,
-        .f32 = null,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = false,
+            .u32 = null,
+            .@"enum" = null,
+            .string = null,
+            .f32 = null,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1207,28 +1242,33 @@ test "all types required" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(9, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(u32, @TypeOf(undef.u32));
-    try expectEqual(Enum, @TypeOf(undef.@"enum"));
-    try expectEqual([]const u8, @TypeOf(undef.string));
-    try expectEqual(f32, @TypeOf(undef.f32));
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(u32, @TypeOf(undef.named.u32));
+    try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual([]const u8, @TypeOf(undef.named.string));
+    try expectEqual(f32, @TypeOf(undef.named.f32));
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1250,15 +1290,19 @@ test "all types required" {
 
     // Repeated args
     try expectEqual(Result{
-        .bool = false,
-        .u32 = 321,
-        .@"enum" = .foo,
-        .string = "updated",
-        .f32 = 3.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = false,
+            .u32 = 321,
+            .@"enum" = .foo,
+            .string = "updated",
+            .f32 = 3.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1290,15 +1334,19 @@ test "all types required" {
 
     // Short names args
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 321,
-        .@"enum" = .foo,
-        .string = "updated",
-        .f32 = 1.5,
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 2.5,
+        .named = .{
+            .bool = true,
+            .u32 = 321,
+            .@"enum" = .foo,
+            .string = "updated",
+            .f32 = 1.5,
+        },
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 2.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1322,8 +1370,15 @@ test "all types required" {
 test "no args" {
     const options: Command = .{ .name = "command name" };
     const Result = options.Result();
-    try expectEqual(0, std.meta.fields(Result).len);
-    try expectEqual(Result{}, try options.parseFromSlice(std.testing.allocator, &.{"path"}));
+    try expectEqual(0, std.meta.fields(Result.Named).len);
+    try expectEqual(0, std.meta.fields(Result.Positional).len);
+    try expectEqual(
+        Result{
+            .named = .{},
+            .positional = .{},
+        },
+        try options.parseFromSlice(std.testing.allocator, &.{"path"}),
+    );
 }
 
 test "only positional" {
@@ -1348,18 +1403,22 @@ test "only positional" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(4, std.meta.fields(Result).len);
-    try expectEqual(u8, @TypeOf(undef.U8));
-    try expectEqual([]const u8, @TypeOf(undef.STRING));
-    try expectEqual(Enum, @TypeOf(undef.ENUM));
-    try expectEqual(f32, @TypeOf(undef.F32));
+    try expectEqual(0, std.meta.fields(Result.Named).len);
+    try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expectEqual(u8, @TypeOf(undef.positional.U8));
+    try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
+    try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
+    try expectEqual(f32, @TypeOf(undef.positional.F32));
 
     // All set
     try expectEqual(Result{
-        .U8 = 1,
-        .STRING = "hello",
-        .ENUM = .foo,
-        .F32 = 1.5,
+        .named = .{},
+        .positional = .{
+            .U8 = 1,
+            .STRING = "hello",
+            .ENUM = .foo,
+            .F32 = 1.5,
+        },
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1395,20 +1454,24 @@ test "only named" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result).len);
-    try expectEqual(bool, @TypeOf(undef.bool));
-    try expectEqual(?u32, @TypeOf(undef.u32));
-    try expectEqual(?Enum, @TypeOf(undef.@"enum"));
-    try expectEqual(?[]const u8, @TypeOf(undef.string));
-    try expectEqual(?f32, @TypeOf(undef.f32));
+    try expectEqual(5, std.meta.fields(Result.Named).len);
+    try expectEqual(0, std.meta.fields(Result.Positional).len);
+    try expectEqual(bool, @TypeOf(undef.named.bool));
+    try expectEqual(?u32, @TypeOf(undef.named.u32));
+    try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
+    try expectEqual(?[]const u8, @TypeOf(undef.named.string));
+    try expectEqual(?f32, @TypeOf(undef.named.f32));
 
     // All set
     try expectEqual(Result{
-        .bool = true,
-        .u32 = 123,
-        .@"enum" = .bar,
-        .string = "world",
-        .f32 = 1.5,
+        .named = .{
+            .bool = true,
+            .u32 = 123,
+            .@"enum" = .bar,
+            .string = "world",
+            .f32 = 1.5,
+        },
+        .positional = .{},
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -2019,12 +2082,14 @@ test "default field values" {
         },
     };
     const Result = options.Result();
-    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-1").default_value.?)).*);
-    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-2").default_value.?)).*.?);
-    try expectEqual(null, std.meta.fieldInfo(Result, .@"named-3").default_value);
-    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Result, .@"named-4").default_value.?)).*);
-    try expectEqual(null, std.meta.fieldInfo(Result, .@"named-5").default_value);
-    try expectEqual(null, std.meta.fieldInfo(Result, .@"POS-1").default_value);
+    const Named = Result.Named;
+    const Positional = Result.Positional;
+    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value.?)).*);
+    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value.?)).*.?);
+    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-3").default_value);
+    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-4").default_value.?)).*);
+    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-5").default_value);
+    try expectEqual(null, std.meta.fieldInfo(Positional, .@"POS-1").default_value);
 }
 
 test "lists" {
@@ -2042,7 +2107,7 @@ test "lists" {
             "path",
         });
         defer options.parseFree(result);
-        try expectEqualSlices([]const u8, &.{}, result.list.items);
+        try expectEqualSlices([]const u8, &.{}, result.named.list.items);
     }
 
     {
@@ -2055,7 +2120,7 @@ test "lists" {
             "bar",
         });
         defer options.parseFree(result);
-        try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.list.items);
+        try expectEqualSlices([]const u8, &.{ "foo", "bar" }, result.named.list.items);
     }
 
     {
@@ -2070,7 +2135,7 @@ test "lists" {
             "--no-list",
         });
         defer options.parseFree(result);
-        try expectEqualSlices([]const u8, &.{}, result.list.items);
+        try expectEqualSlices([]const u8, &.{}, result.named.list.items);
     }
 
     {
@@ -2088,6 +2153,6 @@ test "lists" {
             "baz",
         });
         defer options.parseFree(result);
-        try expectEqualSlices([]const u8, &.{"baz"}, result.list.items);
+        try expectEqualSlices([]const u8, &.{"baz"}, result.named.list.items);
     }
 }
