@@ -13,10 +13,11 @@ pub const Error = error{ OutOfMemory, Parser, Help };
 pub const Command = struct {
     const Self = @This();
 
-    name: []const u8,
+    name: [:0]const u8,
     description: ?[]const u8 = null,
     named_args: []const NamedArg = &.{},
     positional_args: []const PositionalArg = &.{},
+    commands: []const Command = &.{},
 
     /// The result of parsing a command
     pub fn Result(comptime self: Command) type {
@@ -28,8 +29,6 @@ pub const Command = struct {
             if (@typeInfo(arg.type) == .optional and arg.accum) {
                 @compileError(arg.long ++ ": accum arguments cannot be nullable");
             }
-            validateLongName(arg.long);
-            if (arg.short) |short| validateShortName(short);
             const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
             named_fields[i] = .{
                 .name = arg.long,
@@ -69,11 +68,46 @@ pub const Command = struct {
             .is_tuple = false,
         } });
 
+        var command_tags: [self.commands.len]std.builtin.Type.EnumField = undefined;
+        for (self.commands, 0..) |command, i| {
+            command_tags[i] = .{
+                .name = command.name,
+                .value = i,
+            };
+        }
+        const CommandTag = @Type(.{ .@"enum" = .{
+            .tag_type = u16,
+            .fields = &command_tags,
+            .decls = &.{},
+            .is_exhaustive = true,
+        } });
+
+        const CommandResult = if (self.commands.len > 0) b: {
+            var command_fields: [self.commands.len]std.builtin.Type.UnionField = undefined;
+            for (self.commands, 0..) |command, i| {
+                const CommandResult = Result(command);
+                command_fields[i] = .{
+                    .name = command.name,
+                    .type = CommandResult,
+                    .alignment = @alignOf(CommandResult),
+                };
+            }
+            break :b @Type(.{ .@"union" = .{
+                .layout = .auto,
+                .tag_type = CommandTag,
+                .fields = &command_fields,
+                .decls = &.{},
+            } });
+        } else void;
+
         return struct {
             pub const Named = NamedResults;
             pub const Positional = PositionalResults;
+            pub const Command = CommandResult;
+            pub const Commands = CommandTag;
             named: NamedResults,
             positional: PositionalResults,
+            command: ?CommandResult,
         };
     }
 
@@ -148,11 +182,24 @@ pub const Command = struct {
         return self.parseFromAnyIter(gpa, &iter);
     }
 
-    /// Parser implementation
     fn parseFromAnyIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
+        // Skip the executable path
+        _ = iter.*.skip();
+
+        return self.parseCommand(gpa, iter);
+    }
+
+    fn parseCommand(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
+        // Validate types
+        inline for (self.named_args) |arg| {
+            comptime validateLongName(arg.long);
+            if (arg.short) |short| comptime validateShortName(short);
+        }
+
         // Initialize result with all defaults set
         const ParsedCommand = self.Result();
         var result: ParsedCommand = undefined;
+        result.command = null;
         inline for (self.named_args) |arg| {
             if (arg.default) |default| {
                 @field(result.named, arg.long) = @as(*const arg.type, @alignCast(@ptrCast(default))).*;
@@ -170,9 +217,6 @@ pub const Command = struct {
                 @field(result.named, named_arg.long) = .init(gpa);
             }
         }
-
-        // Skip the executable path
-        _ = iter.*.skip();
 
         // Parse the named arguments
         var peeked = while (iter.*.next()) |arg_str| {
@@ -257,17 +301,6 @@ pub const Command = struct {
             @field(result.positional, field.meta) = value;
         }
 
-        // Make sure there are no remaining arguments
-        if (peeked orelse iter.*.next()) |next| {
-            // Check for help
-            try self.checkHelp(next);
-
-            // Emit an error
-            log.err("unexpected positional argument \"{s}\"", .{next});
-            self.usageBrief();
-            return error.Parser;
-        }
-
         // Make sure all non optional args were found
         for (std.meta.tags(NamedArgEnum)) |arg| {
             if (!named_args.contains(arg)) {
@@ -275,6 +308,26 @@ pub const Command = struct {
                 self.usageBrief();
                 return error.Parser;
             }
+        }
+
+        // Parse the command, if any
+        if (peeked orelse iter.*.next()) |next| b: {
+            // Check for help
+            try self.checkHelp(next);
+
+            // Check if it matches a command
+            if (self.commands.len > 0) {
+                if (stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
+                    const parsed_command = try self.commands[@intFromEnum(command_enum)].parseCommand(gpa, iter);
+                    result.command = @unionInit(self.Result().Command, @tagName(command_enum), parsed_command);
+                    break :b;
+                }
+            }
+
+            // Emit an error
+            log.err("unexpected command \"{s}\"", .{next});
+            self.usageBrief();
+            return error.Parser;
         }
 
         return result;
@@ -294,7 +347,7 @@ pub const Command = struct {
 
     fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(self.Result().Named)) {
         const ArgEnum = FieldEnum(self.Result().Named);
-        const max_len = self.positional_args.len + self.named_args.len;
+        const max_len = self.named_args.len;
         comptime var short_args: [max_len]struct { []const u8, ArgEnum } = undefined;
         comptime var len = 0;
         inline for (self.named_args) |arg| {
@@ -697,7 +750,7 @@ fn unsupportedArgumentType(comptime arg_str: []const u8, ty: type) noreturn {
 // ISSUE(https://github.com/ziglang/zig/issues/20310): Calling `std.meta.stringToEnum` directly
 // fails to compile under the current version of Zig if the struct only has a single argument. This
 // wrapper works around the issue.
-pub fn stringToEnum(comptime T: type, str: []const u8) ?T {
+fn stringToEnum(comptime T: type, str: []const u8) ?T {
     if (@typeInfo(T).@"enum".fields.len == 1) {
         if (std.mem.eql(u8, str, @typeInfo(T).@"enum".fields[0].name)) {
             return @enumFromInt(@typeInfo(T).@"enum".fields[0].value);
@@ -773,6 +826,7 @@ test "all types nullable required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -807,6 +861,7 @@ test "all types nullable required" {
             .ENUM = .foo,
             .F32 = 10.1,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -894,6 +949,7 @@ test "all types defaults" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -928,6 +984,7 @@ test "all types defaults" {
             .ENUM = .foo,
             .F32 = 5.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1009,6 +1066,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1043,6 +1101,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1067,6 +1126,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1154,6 +1214,7 @@ test "all types defaults and nullable and null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1188,6 +1249,7 @@ test "all types defaults and nullable and null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1269,6 +1331,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1303,6 +1366,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1347,6 +1411,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1376,6 +1441,7 @@ test "no args" {
         Result{
             .named = .{},
             .positional = .{},
+            .command = null,
         },
         try options.parseFromSlice(std.testing.allocator, &.{"path"}),
     );
@@ -1419,6 +1485,7 @@ test "only positional" {
             .ENUM = .foo,
             .F32 = 1.5,
         },
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1472,6 +1539,7 @@ test "only named" {
             .f32 = 1.5,
         },
         .positional = .{},
+        .command = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
