@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const ArgIterator = std.process.ArgIterator;
 const FieldEnum = std.meta.FieldEnum;
 const log = std.log.scoped(.structopt);
+const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expectEqualSlices = std.testing.expectEqualSlices;
@@ -318,9 +319,13 @@ pub const Command = struct {
             // Check if it matches a command
             if (self.commands.len > 0) {
                 if (stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
-                    const parsed_command = try self.commands[@intFromEnum(command_enum)].parseCommand(gpa, iter);
-                    result.command = @unionInit(self.Result().Command, @tagName(command_enum), parsed_command);
-                    break :b;
+                    switch (command_enum) {
+                        inline else => |command_enum_inline| {
+                            const parsed_command = try self.commands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
+                            result.command = @unionInit(self.Result().Command, @tagName(command_enum_inline), parsed_command);
+                            break :b;
+                        },
+                    }
                 }
             }
 
@@ -801,6 +806,7 @@ test "all types nullable required" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -924,6 +930,7 @@ test "all types defaults" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(u32, @TypeOf(undef.named.u32));
     try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
@@ -1041,6 +1048,7 @@ test "all types defaults and nullable but not null" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -1189,6 +1197,7 @@ test "all types defaults and nullable and null" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -1306,6 +1315,7 @@ test "all types required" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(u32, @TypeOf(undef.named.u32));
     try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
@@ -1437,6 +1447,7 @@ test "no args" {
     const Result = options.Result();
     try expectEqual(0, std.meta.fields(Result.Named).len);
     try expectEqual(0, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(
         Result{
             .named = .{},
@@ -1471,6 +1482,7 @@ test "only positional" {
     const undef: Result = undefined;
     try expectEqual(0, std.meta.fields(Result.Named).len);
     try expectEqual(4, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(u8, @TypeOf(undef.positional.U8));
     try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
     try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
@@ -1523,6 +1535,7 @@ test "only named" {
     const undef: Result = undefined;
     try expectEqual(5, std.meta.fields(Result.Named).len);
     try expectEqual(0, std.meta.fields(Result.Positional).len);
+    try expect(Result.Command == void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -2223,4 +2236,140 @@ test "lists" {
         defer options.parseFree(result);
         try expectEqualSlices([]const u8, &.{"baz"}, result.named.list.items);
     }
+}
+
+test "subcommands" {
+    const options: Command = .{ .name = "command name", .named_args = &.{
+        NamedArg.init([]const u8, .{
+            .long = "foo",
+        }),
+    }, .positional_args = &.{
+        PositionalArg.init(u8, .{
+            .meta = "BAR",
+        }),
+    }, .commands = &.{
+        .{
+            .name = "sub1",
+            .named_args = &.{
+                NamedArg.init([]const u8, .{
+                    .long = "sub1a",
+                }),
+            },
+            .positional_args = &.{
+                PositionalArg.init(u8, .{
+                    .meta = "SUB1B",
+                }),
+            },
+        },
+        .{
+            .name = "sub2",
+            .named_args = &.{
+                NamedArg.init([]const u8, .{
+                    .long = "sub2a",
+                }),
+            },
+            .positional_args = &.{},
+        },
+    } };
+
+    const Result = options.Result();
+    const undef: Result = undefined;
+    try expectEqual(1, std.meta.fields(Result.Named).len);
+    try expectEqual(1, std.meta.fields(Result.Positional).len);
+    try expectEqual(2, std.meta.fields(Result.Command).len);
+    try expectEqual([]const u8, @TypeOf(undef.named.foo));
+    try expectEqual(u8, @TypeOf(undef.positional.BAR));
+
+    const Sub1 = options.commands[0].Result();
+    const undef1: Sub1 = undefined;
+    try expectEqual(1, std.meta.fields(Sub1.Named).len);
+    try expectEqual(1, std.meta.fields(Sub1.Positional).len);
+    try expect(Sub1.Command == void);
+    try expectEqual([]const u8, @TypeOf(undef1.named.sub1a));
+    try expectEqual(u8, @TypeOf(undef1.positional.SUB1B));
+
+    const Sub2 = options.commands[1].Result();
+    const undef2: Sub2 = undefined;
+    try expectEqual(1, std.meta.fields(Sub2.Named).len);
+    try expectEqual(0, std.meta.fields(Sub2.Positional).len);
+    try expect(Sub2.Command == void);
+    try expectEqual([]const u8, @TypeOf(undef2.named.sub2a));
+
+    // No subcommand
+    try expectEqual(Result{
+        .named = .{
+            .foo = "foo",
+        },
+        .positional = .{
+            .BAR = 10,
+        },
+        .command = null,
+    }, try options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+
+        "--foo",
+        "foo",
+        "10",
+    }));
+
+    // First subcommand
+    try expectEqual(Result{
+        .named = .{
+            .foo = "foo",
+        },
+        .positional = .{
+            .BAR = 10,
+        },
+        .command = .{
+            .sub1 = .{
+                .named = .{
+                    .sub1a = "nested",
+                },
+                .positional = .{
+                    .SUB1B = 24,
+                },
+                .command = null,
+            },
+        },
+    }, try options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+
+        "--foo",
+        "foo",
+        "10",
+
+        "sub1",
+        "--sub1a",
+        "nested",
+        "24",
+    }));
+
+    // Second subcommand
+    try expectEqual(Result{
+        .named = .{
+            .foo = "foo",
+        },
+        .positional = .{
+            .BAR = 10,
+        },
+        .command = .{
+            .sub2 = .{
+                .named = .{
+                    .sub2a = "nested2",
+                },
+                .positional = .{},
+                .command = null,
+            },
+        },
+    }, try options.parseFromSlice(std.testing.allocator, &.{
+        "path",
+
+        "--foo",
+        "foo",
+        "10",
+
+        "sub2",
+        "--sub2a",
+        "nested2",
+    }));
 }
