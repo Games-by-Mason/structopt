@@ -18,7 +18,7 @@ pub const Command = struct {
     description: ?[]const u8 = null,
     named_args: []const NamedArg = &.{},
     positional_args: []const PositionalArg = &.{},
-    commands: []const Command = &.{},
+    subcommands: []const Command = &.{},
 
     /// The result of parsing a command
     pub fn Result(comptime self: Command) type {
@@ -69,33 +69,33 @@ pub const Command = struct {
             .is_tuple = false,
         } });
 
-        var command_tags: [self.commands.len]std.builtin.Type.EnumField = undefined;
-        for (self.commands, 0..) |command, i| {
+        var command_tags: [self.subcommands.len]std.builtin.Type.EnumField = undefined;
+        for (self.subcommands, 0..) |command, i| {
             command_tags[i] = .{
                 .name = command.name,
                 .value = i,
             };
         }
-        const CommandTag = @Type(.{ .@"enum" = .{
+        const SubcommandTag = @Type(.{ .@"enum" = .{
             .tag_type = u16,
             .fields = &command_tags,
             .decls = &.{},
             .is_exhaustive = true,
         } });
 
-        const CommandResult = if (self.commands.len > 0) b: {
-            var command_fields: [self.commands.len]std.builtin.Type.UnionField = undefined;
-            for (self.commands, 0..) |command, i| {
-                const CommandResult = Result(command);
+        const Subcommand = if (self.subcommands.len > 0) b: {
+            var command_fields: [self.subcommands.len]std.builtin.Type.UnionField = undefined;
+            for (self.subcommands, 0..) |command, i| {
+                const Subcommand = Result(command);
                 command_fields[i] = .{
                     .name = command.name,
-                    .type = CommandResult,
-                    .alignment = @alignOf(CommandResult),
+                    .type = Subcommand,
+                    .alignment = @alignOf(Subcommand),
                 };
             }
             break :b @Type(.{ .@"union" = .{
                 .layout = .auto,
-                .tag_type = CommandTag,
+                .tag_type = SubcommandTag,
                 .fields = &command_fields,
                 .decls = &.{},
             } });
@@ -104,11 +104,11 @@ pub const Command = struct {
         return struct {
             pub const Named = NamedResults;
             pub const Positional = PositionalResults;
-            pub const Command = CommandResult;
-            pub const Commands = CommandTag;
+            pub const Command = Subcommand;
+            pub const Commands = SubcommandTag;
             named: NamedResults,
             positional: PositionalResults,
-            command: ?CommandResult,
+            subcommand: ?Subcommand,
         };
     }
 
@@ -192,6 +192,7 @@ pub const Command = struct {
 
     fn parseCommand(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
         // Validate types
+        comptime validateLongName(self.name);
         inline for (self.named_args) |arg| {
             comptime validateLongName(arg.long);
             if (arg.short) |short| comptime validateShortName(short);
@@ -200,7 +201,7 @@ pub const Command = struct {
         // Initialize result with all defaults set
         const ParsedCommand = self.Result();
         var result: ParsedCommand = undefined;
-        result.command = null;
+        result.subcommand = null;
         inline for (self.named_args) |arg| {
             if (arg.default) |default| {
                 @field(result.named, arg.long) = @as(*const arg.type, @alignCast(@ptrCast(default))).*;
@@ -317,12 +318,12 @@ pub const Command = struct {
             try self.checkHelp(next);
 
             // Check if it matches a command
-            if (self.commands.len > 0) {
+            if (self.subcommands.len > 0) {
                 if (stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
                     switch (command_enum) {
                         inline else => |command_enum_inline| {
-                            const parsed_command = try self.commands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
-                            result.command = @unionInit(self.Result().Command, @tagName(command_enum_inline), parsed_command);
+                            const parsed_command = try self.subcommands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
+                            result.subcommand = @unionInit(self.Result().Command, @tagName(command_enum_inline), parsed_command);
                             break :b;
                         },
                     }
@@ -511,6 +512,23 @@ pub const Command = struct {
                 );
             }
         }
+
+        // Subcommands:
+        if (self.options.subcommands.len > 0) {
+            try writer.writeAll("\nsubcommands:\n");
+            inline for (self.options.subcommands) |subcommand| {
+                const sub_fmt = "  {s}";
+                const sub_args = .{subcommand.name};
+                try writer.print(sub_fmt, sub_args);
+                if (subcommand.description) |description| {
+                    const count = std.fmt.count(sub_fmt, sub_args);
+                    if (std.math.sub(usize, col, count) catch null) |padding| {
+                        try writer.writeByteNTimes(' ', padding);
+                    }
+                    try writer.print("{s}\n", .{description});
+                }
+            }
+        }
     }
 
     fn writeArg(
@@ -532,28 +550,28 @@ pub const Command = struct {
 
         // Write the argument, and measure how many characters it took
         var count = if (short) |s| b: {
-            const lhs_fmt = "  -{c}, --{s}{}";
-            const lhs_args = .{ s, long, fmtType(T) };
-            try writer.print(lhs_fmt, lhs_args);
-            break :b std.fmt.count(lhs_fmt, lhs_args);
+            const name_fmt = "  -{c}, --{s}{}";
+            const name_args = .{ s, long, fmtType(T) };
+            try writer.print(name_fmt, name_args);
+            break :b std.fmt.count(name_fmt, name_args);
         } else b: {
             const prefix = if (positional) "" else "--";
-            const lhs_fmt = "  {s}{s}{}";
-            const lhs_args = .{ prefix, long, fmtType(T) };
-            try writer.print(lhs_fmt, lhs_args);
-            break :b std.fmt.count(lhs_fmt, lhs_args);
+            const name_fmt = "  {s}{s}{}";
+            const name_args = .{ prefix, long, fmtType(T) };
+            try writer.print(name_fmt, name_args);
+            break :b std.fmt.count(name_fmt, name_args);
         };
 
         if (default) |untyped| {
             const typed: *const T = @alignCast(@ptrCast(untyped));
-            const lhs_fmt = if (Inner == []const u8 or @typeInfo(Inner) == .@"enum") b: {
+            const default_fmt = if (Inner == []const u8 or @typeInfo(Inner) == .@"enum") b: {
                 break :b " (={?s})";
             } else if (@typeInfo(Inner) == .float) b: {
                 break :b " (={?d})";
             } else b: {
                 break :b " (={?})";
             };
-            const rhs_fmt = if (@typeInfo(Inner) == .@"enum") b: {
+            const default_args = if (@typeInfo(Inner) == .@"enum") b: {
                 if (Inner != T) {
                     if (typed.*) |some| {
                         break :b .{@tagName(some)};
@@ -566,8 +584,8 @@ pub const Command = struct {
             } else b: {
                 break :b .{typed.*};
             };
-            count += std.fmt.count(lhs_fmt, rhs_fmt);
-            try writer.print(lhs_fmt, rhs_fmt);
+            count += std.fmt.count(default_fmt, default_args);
+            try writer.print(default_fmt, default_args);
         }
 
         if (accum) {
@@ -768,7 +786,7 @@ fn stringToEnum(comptime T: type, str: []const u8) ?T {
 test "all types nullable required" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -832,7 +850,7 @@ test "all types nullable required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -867,7 +885,7 @@ test "all types nullable required" {
             .ENUM = .foo,
             .F32 = 10.1,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -887,7 +905,7 @@ test "all types nullable required" {
 test "all types defaults" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -956,7 +974,7 @@ test "all types defaults" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -991,7 +1009,7 @@ test "all types defaults" {
             .ENUM = .foo,
             .F32 = 5.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1005,7 +1023,7 @@ test "all types defaults" {
 test "all types defaults and nullable but not null" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -1074,7 +1092,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1109,7 +1127,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1134,7 +1152,7 @@ test "all types defaults and nullable but not null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1154,7 +1172,7 @@ test "all types defaults and nullable but not null" {
 test "all types defaults and nullable and null" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -1223,7 +1241,7 @@ test "all types defaults and nullable and null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1258,7 +1276,7 @@ test "all types defaults and nullable and null" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1272,7 +1290,7 @@ test "all types defaults and nullable and null" {
 test "all types required" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -1341,7 +1359,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1376,7 +1394,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1421,7 +1439,7 @@ test "all types required" {
             .ENUM = .foo,
             .F32 = 2.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1443,7 +1461,7 @@ test "all types required" {
 }
 
 test "no args" {
-    const options: Command = .{ .name = "command name" };
+    const options: Command = .{ .name = "command-name" };
     const Result = options.Result();
     try expectEqual(0, std.meta.fields(Result.Named).len);
     try expectEqual(0, std.meta.fields(Result.Positional).len);
@@ -1452,7 +1470,7 @@ test "no args" {
         Result{
             .named = .{},
             .positional = .{},
-            .command = null,
+            .subcommand = null,
         },
         try options.parseFromSlice(std.testing.allocator, &.{"path"}),
     );
@@ -1461,7 +1479,7 @@ test "no args" {
 test "only positional" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .positional_args = &.{
             PositionalArg.init(u8, .{
                 .meta = "U8",
@@ -1497,7 +1515,7 @@ test "only positional" {
             .ENUM = .foo,
             .F32 = 1.5,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1511,7 +1529,7 @@ test "only positional" {
 test "only named" {
     const Enum = enum { foo, bar };
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -1552,7 +1570,7 @@ test "only named" {
             .f32 = 1.5,
         },
         .positional = .{},
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -1571,7 +1589,7 @@ test "only named" {
 test "help menu" {
     const Enum = enum { foo, bar };
     const no_help: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(bool, .{
                 .long = "bool",
@@ -1609,7 +1627,7 @@ test "help menu" {
     };
 
     const with_help: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .description = "command help",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -1658,7 +1676,7 @@ test "help menu" {
     };
 
     const with_help_with_defaults_optional: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .description = "command help",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -1712,7 +1730,7 @@ test "help menu" {
     };
 
     const with_help_with_defaults_optional_null: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .description = "command help",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -1766,7 +1784,7 @@ test "help menu" {
     };
 
     const with_help_with_defaults: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .description = "command help",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -1819,11 +1837,40 @@ test "help menu" {
         },
     };
 
+    const with_subcommand: Command = .{
+        .name = "command-name",
+        .description = "command help",
+        .named_args = &.{
+            NamedArg.init(bool, .{
+                .long = "bool",
+                .description = "bool help",
+                .default = .{ .value = true },
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "U8",
+                .description = "u8 help",
+            }),
+        },
+        .subcommands = &.{.{
+            .name = "subcommand",
+            .description = "subcommand help",
+            .named_args = &.{
+                NamedArg.init(bool, .{
+                    .long = "bool2",
+                    .description = "bool2 help",
+                    .default = .{ .value = true },
+                }),
+            },
+        }},
+    };
+
     {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{no_help.fmtUsage(true)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\--help for more info
         , found);
     }
@@ -1832,7 +1879,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help.fmtUsage(true)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\--help for more info
         , found);
     }
@@ -1841,7 +1888,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{no_help.fmtUsage(false)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\
             \\options:
             \\  --bool
@@ -1874,7 +1921,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help.fmtUsage(false)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\
             \\command help
             \\
@@ -1909,7 +1956,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional.fmtUsage(false)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\
             \\command help
             \\
@@ -1944,7 +1991,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional_null.fmtUsage(false)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\
             \\command help
             \\
@@ -1979,7 +2026,7 @@ test "help menu" {
         const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults.fmtUsage(false)});
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command name
+            \\usage: command-name
             \\
             \\command help
             \\
@@ -2009,11 +2056,32 @@ test "help menu" {
             \\
         , found);
     }
+
+    {
+        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_subcommand.fmtUsage(false)});
+        defer std.testing.allocator.free(found);
+        try expectEqualStrings(
+            \\usage: command-name
+            \\
+            \\command help
+            \\
+            \\options:
+            \\  --bool (=true)                                  bool help
+            \\  --no-bool
+            \\
+            \\positional arguments:
+            \\  U8 <u8>                                         u8 help
+            \\
+            \\subcommands:
+            \\  subcommand                                      subcommand help
+            \\
+        , found);
+    }
 }
 
 test "help argument" {
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init([]const u8, .{
                 .long = "named-1",
@@ -2133,7 +2201,7 @@ test "help argument" {
 
 test "default field values" {
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.init(?u8, .{
                 .long = "named-1",
@@ -2175,7 +2243,7 @@ test "default field values" {
 
 test "lists" {
     const options: Command = .{
-        .name = "command name",
+        .name = "command-name",
         .named_args = &.{
             NamedArg.initAccum([]const u8, .{
                 .long = "list",
@@ -2239,7 +2307,7 @@ test "lists" {
 }
 
 test "subcommands" {
-    const options: Command = .{ .name = "command name", .named_args = &.{
+    const options: Command = .{ .name = "command-name", .named_args = &.{
         NamedArg.init([]const u8, .{
             .long = "foo",
         }),
@@ -2247,7 +2315,7 @@ test "subcommands" {
         PositionalArg.init(u8, .{
             .meta = "BAR",
         }),
-    }, .commands = &.{
+    }, .subcommands = &.{
         .{
             .name = "sub1",
             .named_args = &.{
@@ -2280,7 +2348,7 @@ test "subcommands" {
     try expectEqual([]const u8, @TypeOf(undef.named.foo));
     try expectEqual(u8, @TypeOf(undef.positional.BAR));
 
-    const Sub1 = options.commands[0].Result();
+    const Sub1 = options.subcommands[0].Result();
     const undef1: Sub1 = undefined;
     try expectEqual(1, std.meta.fields(Sub1.Named).len);
     try expectEqual(1, std.meta.fields(Sub1.Positional).len);
@@ -2288,7 +2356,7 @@ test "subcommands" {
     try expectEqual([]const u8, @TypeOf(undef1.named.sub1a));
     try expectEqual(u8, @TypeOf(undef1.positional.SUB1B));
 
-    const Sub2 = options.commands[1].Result();
+    const Sub2 = options.subcommands[1].Result();
     const undef2: Sub2 = undefined;
     try expectEqual(1, std.meta.fields(Sub2.Named).len);
     try expectEqual(0, std.meta.fields(Sub2.Positional).len);
@@ -2303,7 +2371,7 @@ test "subcommands" {
         .positional = .{
             .BAR = 10,
         },
-        .command = null,
+        .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
         "path",
 
@@ -2320,7 +2388,7 @@ test "subcommands" {
         .positional = .{
             .BAR = 10,
         },
-        .command = .{
+        .subcommand = .{
             .sub1 = .{
                 .named = .{
                     .sub1a = "nested",
@@ -2328,7 +2396,7 @@ test "subcommands" {
                 .positional = .{
                     .SUB1B = 24,
                 },
-                .command = null,
+                .subcommand = null,
             },
         },
     }, try options.parseFromSlice(std.testing.allocator, &.{
@@ -2352,13 +2420,13 @@ test "subcommands" {
         .positional = .{
             .BAR = 10,
         },
-        .command = .{
+        .subcommand = .{
             .sub2 = .{
                 .named = .{
                     .sub2a = "nested2",
                 },
                 .positional = .{},
-                .command = null,
+                .subcommand = null,
             },
         },
     }, try options.parseFromSlice(std.testing.allocator, &.{
