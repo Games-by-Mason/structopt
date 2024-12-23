@@ -221,7 +221,7 @@ pub const Command = struct {
         }
 
         // Parse the named arguments
-        var peeked = while (iter.*.next()) |arg_str| {
+        var peeked: ?[]const u8 = while (iter.*.next()) |arg_str| {
             // Stop parsing if we find a positional argument
             if (arg_str[0] != '-') {
                 break arg_str;
