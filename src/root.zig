@@ -213,7 +213,7 @@ pub const Command = struct {
         var named_args: std.EnumSet(NamedArgEnum) = .{};
         inline for (self.named_args) |named_arg| {
             if (named_arg.default != null or named_arg.accum) {
-                named_args.insert(stringToEnum(NamedArgEnum, named_arg.long).?);
+                named_args.insert(std.meta.stringToEnum(NamedArgEnum, named_arg.long).?);
             }
             if (named_arg.accum) {
                 @field(result.named, named_arg.long) = .init(gpa);
@@ -240,7 +240,7 @@ pub const Command = struct {
                 if (lookup.len == 1) {
                     break :b getShortArgs(self).get(lookup);
                 } else {
-                    break :b stringToEnum(NamedArgEnum, lookup);
+                    break :b std.meta.stringToEnum(NamedArgEnum, lookup);
                 }
             } orelse {
                 log.err("unexpected argument \"{s}\"", .{arg_name});
@@ -319,7 +319,7 @@ pub const Command = struct {
 
             // Check if it matches a command
             if (self.subcommands.len > 0) {
-                if (stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
+                if (std.meta.stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
                     switch (command_enum) {
                         inline else => |command_enum_inline| {
                             const parsed_command = try self.subcommands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
@@ -768,19 +768,6 @@ fn validateShortName(comptime c: u8) void {
 
 fn unsupportedArgumentType(comptime arg_str: []const u8, ty: type) noreturn {
     @compileError(arg_str ++ ": unsupported argument type " ++ @typeName(ty));
-}
-
-// ISSUE(https://github.com/ziglang/zig/issues/20310): Calling `std.meta.stringToEnum` directly
-// fails to compile under the current version of Zig if the struct only has a single argument. This
-// wrapper works around the issue.
-fn stringToEnum(comptime T: type, str: []const u8) ?T {
-    if (@typeInfo(T).@"enum".fields.len == 1) {
-        if (std.mem.eql(u8, str, @typeInfo(T).@"enum".fields[0].name)) {
-            return @enumFromInt(@typeInfo(T).@"enum".fields[0].value);
-        }
-        return null;
-    }
-    return std.meta.stringToEnum(T, str);
 }
 
 test "all types nullable required" {
