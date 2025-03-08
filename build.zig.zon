@@ -1,7 +1,8 @@
 .{
-    .name = "structopt",
+    .name = .structopt,
+    .fingerprint = 0x2636533c024a0b3a,
     .version = "0.0.0",
-    .minimum_zig_version = "0.14.0-dev.1495+f29bdd674",
+    .minimum_zig_version = "0.14.0",
     .dependencies = .{},
     .paths = .{
         "build.zig",

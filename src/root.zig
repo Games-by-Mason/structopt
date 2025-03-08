@@ -34,7 +34,7 @@ pub const Command = struct {
             named_fields[i] = .{
                 .name = arg.long,
                 .type = T,
-                .default_value = arg.default,
+                .default_value_ptr = arg.default,
                 .is_comptime = false,
                 .alignment = @alignOf(T),
             };
@@ -57,7 +57,7 @@ pub const Command = struct {
             positional_fields[i] = .{
                 .name = arg.meta,
                 .type = arg.type,
-                .default_value = null,
+                .default_value_ptr = null,
                 .is_comptime = false,
                 .alignment = @alignOf(arg.type),
             };
@@ -2220,12 +2220,12 @@ test "default field values" {
     const Result = options.Result();
     const Named = Result.Named;
     const Positional = Result.Positional;
-    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value.?)).*);
-    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value.?)).*.?);
-    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-3").default_value);
-    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-4").default_value.?)).*);
-    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-5").default_value);
-    try expectEqual(null, std.meta.fieldInfo(Positional, .@"POS-1").default_value);
+    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value_ptr.?)).*);
+    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value_ptr.?)).*.?);
+    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-3").default_value_ptr);
+    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-4").default_value_ptr.?)).*);
+    try expectEqual(null, std.meta.fieldInfo(Named, .@"named-5").default_value_ptr);
+    try expectEqual(null, std.meta.fieldInfo(Positional, .@"POS-1").default_value_ptr);
 }
 
 test "lists" {
