@@ -20,8 +20,26 @@ pub const Command = struct {
     positional_args: []const PositionalArg = &.{},
     subcommands: []const Command = &.{},
 
-    /// The result of parsing a command
     pub fn Result(comptime self: Command) type {
+        return struct {
+            program_name: []const u8,
+            named: @FieldType(self.Subcommand(), "named"),
+            positional: @FieldType(self.Subcommand(), "positional"),
+            subcommand: @FieldType(self.Subcommand(), "subcommand"),
+
+            fn fromSubcommand(program_name: []const u8, subcommand: self.Subcommand()) @This() {
+                return .{
+                    .program_name = program_name,
+                    .named = subcommand.named,
+                    .positional = subcommand.positional,
+                    .subcommand = subcommand.subcommand,
+                };
+            }
+        };
+    }
+
+    /// The result of parsing a command
+    pub fn Subcommand(comptime self: Command) type {
         var named_fields: [self.named_args.len]std.builtin.Type.StructField = undefined;
         for (self.named_args, 0..) |arg, i| {
             if (arg.type == ?bool) {
@@ -83,14 +101,14 @@ pub const Command = struct {
             .is_exhaustive = true,
         } });
 
-        const Subcommand = if (self.subcommands.len > 0) b: {
+        const Subcommands = if (self.subcommands.len > 0) b: {
             var command_fields: [self.subcommands.len]std.builtin.Type.UnionField = undefined;
             for (self.subcommands, 0..) |command, i| {
-                const Subcommand = Result(command);
+                const Current = Subcommand(command);
                 command_fields[i] = .{
                     .name = command.name,
-                    .type = Subcommand,
-                    .alignment = @alignOf(Subcommand),
+                    .type = Current,
+                    .alignment = @alignOf(Current),
                 };
             }
             break :b @Type(.{ .@"union" = .{
@@ -102,13 +120,9 @@ pub const Command = struct {
         } else void;
 
         return struct {
-            pub const Named = NamedResults;
-            pub const Positional = PositionalResults;
-            pub const Command = Subcommand;
-            pub const Commands = SubcommandTag;
             named: NamedResults,
             positional: PositionalResults,
-            subcommand: ?Subcommand,
+            subcommand: ?Subcommands,
         };
     }
 
@@ -184,13 +198,15 @@ pub const Command = struct {
     }
 
     fn parseFromAnyIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
-        // Skip the executable path
-        _ = iter.*.skip();
-
-        return self.parseCommand(gpa, iter);
+        const program_name = iter.*.next() orelse {
+            log.err("expected program name", .{});
+            return error.Parser;
+        };
+        const command = try self.parseCommand(gpa, iter);
+        return .fromSubcommand(program_name, command);
     }
 
-    fn parseCommand(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
+    fn parseCommand(self: @This(), gpa: Allocator, iter: anytype) Error!self.Subcommand() {
         // Validate types
         comptime validateLongName(self.name);
         inline for (self.named_args) |arg| {
@@ -199,7 +215,7 @@ pub const Command = struct {
         }
 
         // Initialize result with all defaults set
-        const ParsedCommand = self.Result();
+        const ParsedCommand = self.Subcommand();
         var result: ParsedCommand = undefined;
         result.subcommand = null;
         inline for (self.named_args) |arg| {
@@ -209,7 +225,7 @@ pub const Command = struct {
         }
 
         // Parse the arguments
-        const NamedArgEnum = FieldEnum(ParsedCommand.Named);
+        const NamedArgEnum = FieldEnum(@FieldType(ParsedCommand, "named"));
         var named_args: std.EnumSet(NamedArgEnum) = .{};
         inline for (self.named_args) |named_arg| {
             if (named_arg.default != null or named_arg.accum) {
@@ -255,7 +271,7 @@ pub const Command = struct {
             // Parse the argument value
             switch (field_enum) {
                 inline else => |field_enum_inline| {
-                    const field = @typeInfo(ParsedCommand.Named).@"struct".fields[@intFromEnum(field_enum_inline)];
+                    const field = @typeInfo(@FieldType(ParsedCommand, "named")).@"struct".fields[@intFromEnum(field_enum_inline)];
                     if (negated) {
                         if (field.type == bool) {
                             @field(result.named, field.name) = false;
@@ -319,11 +335,13 @@ pub const Command = struct {
 
             // Check if it matches a command
             if (self.subcommands.len > 0) {
-                if (std.meta.stringToEnum(FieldEnum(self.Result().Commands), next)) |command_enum| {
+                const Commands = @typeInfo(@FieldType(self.Subcommand(), "subcommand")).optional.child;
+                if (std.meta.stringToEnum(FieldEnum(Commands), next)) |command_enum| {
                     switch (command_enum) {
                         inline else => |command_enum_inline| {
                             const parsed_command = try self.subcommands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
-                            result.subcommand = @unionInit(self.Result().Command, @tagName(command_enum_inline), parsed_command);
+                            const Current = @typeInfo(@FieldType(self.Subcommand(), "subcommand")).optional.child;
+                            result.subcommand = @unionInit(Current, @tagName(command_enum_inline), parsed_command);
                             break :b;
                         },
                     }
@@ -351,8 +369,8 @@ pub const Command = struct {
         }
     }
 
-    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(self.Result().Named)) {
-        const ArgEnum = FieldEnum(self.Result().Named);
+    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(@FieldType(self.Subcommand(), "named"))) {
+        const ArgEnum = FieldEnum(@FieldType(self.Subcommand(), "named"));
         const max_len = self.named_args.len;
         comptime var short_args: [max_len]struct { []const u8, ArgEnum } = undefined;
         comptime var len = 0;
@@ -809,9 +827,9 @@ test "all types nullable required" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -824,6 +842,7 @@ test "all types nullable required" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -859,6 +878,7 @@ test "all types nullable required" {
 
     // All null
     try expectEqual(Result{
+        .program_name = "path1",
         .named = .{
             .bool = false,
             .u32 = null,
@@ -874,7 +894,7 @@ test "all types nullable required" {
         },
         .subcommand = null,
     }, try options.parseFromSlice(std.testing.allocator, &.{
-        "path",
+        "path1",
 
         "--no-u32",
         "--no-enum",
@@ -933,9 +953,9 @@ test "all types defaults" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(u32, @TypeOf(undef.named.u32));
     try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
@@ -948,6 +968,7 @@ test "all types defaults" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -983,6 +1004,7 @@ test "all types defaults" {
 
     // All skipped
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -1051,9 +1073,9 @@ test "all types defaults and nullable but not null" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -1066,6 +1088,7 @@ test "all types defaults and nullable but not null" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -1101,6 +1124,7 @@ test "all types defaults and nullable but not null" {
 
     // All skipped
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -1126,6 +1150,7 @@ test "all types defaults and nullable but not null" {
 
     // All null
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = false,
             .u32 = null,
@@ -1200,9 +1225,9 @@ test "all types defaults and nullable and null" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -1215,6 +1240,7 @@ test "all types defaults and nullable and null" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -1250,6 +1276,7 @@ test "all types defaults and nullable and null" {
 
     // All skipped
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = false,
             .u32 = null,
@@ -1318,9 +1345,9 @@ test "all types required" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(u32, @TypeOf(undef.named.u32));
     try expectEqual(Enum, @TypeOf(undef.named.@"enum"));
@@ -1333,6 +1360,7 @@ test "all types required" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -1368,6 +1396,7 @@ test "all types required" {
 
     // Repeated args
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = false,
             .u32 = 321,
@@ -1413,6 +1442,7 @@ test "all types required" {
 
     // Short names args
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 321,
@@ -1450,11 +1480,12 @@ test "all types required" {
 test "no args" {
     const options: Command = .{ .name = "command-name" };
     const Result = options.Result();
-    try expectEqual(0, std.meta.fields(Result.Named).len);
-    try expectEqual(0, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(0, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(0, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(
         Result{
+            .program_name = "path",
             .named = .{},
             .positional = .{},
             .subcommand = null,
@@ -1485,9 +1516,9 @@ test "only positional" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(0, std.meta.fields(Result.Named).len);
-    try expectEqual(4, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(0, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(4, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(u8, @TypeOf(undef.positional.U8));
     try expectEqual([]const u8, @TypeOf(undef.positional.STRING));
     try expectEqual(Enum, @TypeOf(undef.positional.ENUM));
@@ -1495,6 +1526,7 @@ test "only positional" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{},
         .positional = .{
             .U8 = 1,
@@ -1538,9 +1570,9 @@ test "only named" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(5, std.meta.fields(Result.Named).len);
-    try expectEqual(0, std.meta.fields(Result.Positional).len);
-    try expect(Result.Command == void);
+    try expectEqual(5, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(0, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expect(@FieldType(Result, "subcommand") == ?void);
     try expectEqual(bool, @TypeOf(undef.named.bool));
     try expectEqual(?u32, @TypeOf(undef.named.u32));
     try expectEqual(?Enum, @TypeOf(undef.named.@"enum"));
@@ -1549,6 +1581,7 @@ test "only named" {
 
     // All set
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .bool = true,
             .u32 = 123,
@@ -2218,8 +2251,8 @@ test "default field values" {
         },
     };
     const Result = options.Result();
-    const Named = Result.Named;
-    const Positional = Result.Positional;
+    const Named = @FieldType(Result, "named");
+    const Positional = @FieldType(Result, "positional");
     try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value_ptr.?)).*);
     try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value_ptr.?)).*.?);
     try expectEqual(null, std.meta.fieldInfo(Named, .@"named-3").default_value_ptr);
@@ -2329,29 +2362,30 @@ test "subcommands" {
 
     const Result = options.Result();
     const undef: Result = undefined;
-    try expectEqual(1, std.meta.fields(Result.Named).len);
-    try expectEqual(1, std.meta.fields(Result.Positional).len);
-    try expectEqual(2, std.meta.fields(Result.Command).len);
+    try expectEqual(1, std.meta.fields(@FieldType(Result, "named")).len);
+    try expectEqual(1, std.meta.fields(@FieldType(Result, "positional")).len);
+    try expectEqual(2, std.meta.fields(@typeInfo(@FieldType(Result, "subcommand")).optional.child).len);
     try expectEqual([]const u8, @TypeOf(undef.named.foo));
     try expectEqual(u8, @TypeOf(undef.positional.BAR));
 
     const Sub1 = options.subcommands[0].Result();
     const undef1: Sub1 = undefined;
-    try expectEqual(1, std.meta.fields(Sub1.Named).len);
-    try expectEqual(1, std.meta.fields(Sub1.Positional).len);
-    try expect(Sub1.Command == void);
+    try expectEqual(1, std.meta.fields(@FieldType(Sub1, "named")).len);
+    try expectEqual(1, std.meta.fields(@FieldType(Sub1, "positional")).len);
+    try expect(@FieldType(Sub1, "subcommand") == ?void);
     try expectEqual([]const u8, @TypeOf(undef1.named.sub1a));
     try expectEqual(u8, @TypeOf(undef1.positional.SUB1B));
 
     const Sub2 = options.subcommands[1].Result();
     const undef2: Sub2 = undefined;
-    try expectEqual(1, std.meta.fields(Sub2.Named).len);
-    try expectEqual(0, std.meta.fields(Sub2.Positional).len);
-    try expect(Sub2.Command == void);
+    try expectEqual(1, std.meta.fields(@FieldType(Sub2, "named")).len);
+    try expectEqual(0, std.meta.fields(@FieldType(Sub2, "positional")).len);
+    try expect(@FieldType(Sub2, "subcommand") == ?void);
     try expectEqual([]const u8, @TypeOf(undef2.named.sub2a));
 
     // No subcommand
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .foo = "foo",
         },
@@ -2369,6 +2403,7 @@ test "subcommands" {
 
     // First subcommand
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .foo = "foo",
         },
@@ -2401,6 +2436,7 @@ test "subcommands" {
 
     // Second subcommand
     try expectEqual(Result{
+        .program_name = "path",
         .named = .{
             .foo = "foo",
         },
