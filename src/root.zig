@@ -149,7 +149,11 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process, exit on help or failure. Panics on OOM.
-    pub fn parseOrExit(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) self.Result() {
+    pub fn parseOrExit(
+        self: @This(),
+        gpa: Allocator,
+        iter: *std.process.ArgIterator,
+    ) self.Result() {
         return self.parse(gpa, iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
@@ -166,12 +170,20 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process.
-    pub fn parse(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) Error!self.Result() {
+    pub fn parse(
+        self: @This(),
+        gpa: Allocator,
+        iter: *std.process.ArgIterator,
+    ) Error!self.Result() {
         return self.parseFromAnyIter(gpa, &iter);
     }
 
     /// Parse commands from the given slice.
-    pub fn parseFromSlice(self: @This(), gpa: Allocator, args: []const []const u8) Error!self.Result() {
+    pub fn parseFromSlice(
+        self: @This(),
+        gpa: Allocator,
+        args: []const []const u8,
+    ) Error!self.Result() {
         const Iter = struct {
             slice: []const []const u8,
 
@@ -220,7 +232,10 @@ pub const Command = struct {
         result.subcommand = null;
         inline for (self.named_args) |arg| {
             if (arg.default) |default| {
-                @field(result.named, arg.long) = @as(*const arg.type, @alignCast(@ptrCast(default))).*;
+                @field(result.named, arg.long) = @as(
+                    *const arg.type,
+                    @alignCast(@ptrCast(default)),
+                ).*;
             }
         }
 
@@ -247,7 +262,10 @@ pub const Command = struct {
             try self.checkHelp(arg_str);
 
             // Parse the argument name
-            const arg_name = if (arg_str.len > 2 and arg_str[1] == '-') arg_str[2..] else arg_str[1..];
+            const arg_name = if (arg_str.len > 2 and arg_str[1] == '-')
+                arg_str[2..]
+            else
+                arg_str[1..];
             const negated = std.mem.startsWith(u8, arg_name, "no-");
             const lookup = if (negated) arg_name[3..] else arg_name;
 
@@ -271,7 +289,8 @@ pub const Command = struct {
             // Parse the argument value
             switch (field_enum) {
                 inline else => |field_enum_inline| {
-                    const field = @typeInfo(@FieldType(ParsedCommand, "named")).@"struct".fields[@intFromEnum(field_enum_inline)];
+                    const field = @typeInfo(@FieldType(ParsedCommand, "named")).@"struct"
+                        .fields[@intFromEnum(field_enum_inline)];
                     if (negated) {
                         if (field.type == bool) {
                             @field(result.named, field.name) = false;
@@ -335,13 +354,16 @@ pub const Command = struct {
 
             // Check if it matches a command
             if (self.subcommands.len > 0) {
-                const Commands = @typeInfo(@FieldType(self.Subcommand(), "subcommand")).optional.child;
+                const Commands = @typeInfo(@FieldType(self.Subcommand(), "subcommand"))
+                    .optional.child;
                 if (std.meta.stringToEnum(FieldEnum(Commands), next)) |command_enum| {
                     switch (command_enum) {
-                        inline else => |command_enum_inline| {
-                            const parsed_command = try self.subcommands[@intFromEnum(command_enum_inline)].parseCommand(gpa, iter);
-                            const Current = @typeInfo(@FieldType(self.Subcommand(), "subcommand")).optional.child;
-                            result.subcommand = @unionInit(Current, @tagName(command_enum_inline), parsed_command);
+                        inline else => |cmd| {
+                            const parsed_command = try self.subcommands[@intFromEnum(cmd)]
+                                .parseCommand(gpa, iter);
+                            const Current = @typeInfo(@FieldType(self.Subcommand(), "subcommand"))
+                                .optional.child;
+                            result.subcommand = @unionInit(Current, @tagName(cmd), parsed_command);
                             break :b;
                         },
                     }
@@ -369,7 +391,9 @@ pub const Command = struct {
         }
     }
 
-    fn getShortArgs(comptime self: @This()) std.StaticStringMap(FieldEnum(@FieldType(self.Subcommand(), "named"))) {
+    fn getShortArgs(
+        comptime self: @This(),
+    ) std.StaticStringMap(FieldEnum(@FieldType(self.Subcommand(), "named"))) {
         const ArgEnum = FieldEnum(@FieldType(self.Subcommand(), "named"));
         const max_len = self.named_args.len;
         comptime var short_args: [max_len]struct { []const u8, ArgEnum } = undefined;
@@ -1887,7 +1911,11 @@ test "help menu" {
     };
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{no_help.fmtUsage(true)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{no_help.fmtUsage(true)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -1896,7 +1924,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help.fmtUsage(true)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_help.fmtUsage(true)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -1905,7 +1937,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{no_help.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{no_help.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -1938,7 +1974,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_help.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -1973,7 +2013,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_help_with_defaults_optional.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -2008,7 +2052,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults_optional_null.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_help_with_defaults_optional_null.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -2043,7 +2091,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_help_with_defaults.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_help_with_defaults.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -2078,7 +2130,11 @@ test "help menu" {
     }
 
     {
-        const found = try std.fmt.allocPrint(std.testing.allocator, "{}", .{with_subcommand.fmtUsage(false)});
+        const found = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "{}",
+            .{with_subcommand.fmtUsage(false)},
+        );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
             \\usage: command-name
@@ -2253,10 +2309,19 @@ test "default field values" {
     const Result = options.Result();
     const Named = @FieldType(Result, "named");
     const Positional = @FieldType(Result, "positional");
-    try expectEqual(null, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value_ptr.?)).*);
-    try expectEqual(10, @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value_ptr.?)).*.?);
+    try expectEqual(
+        null,
+        @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-1").default_value_ptr.?)).*,
+    );
+    try expectEqual(
+        10,
+        @as(*const ?u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-2").default_value_ptr.?)).*.?,
+    );
     try expectEqual(null, std.meta.fieldInfo(Named, .@"named-3").default_value_ptr);
-    try expectEqual(10, @as(*const u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-4").default_value_ptr.?)).*);
+    try expectEqual(
+        10,
+        @as(*const u8, @ptrCast(std.meta.fieldInfo(Named, .@"named-4").default_value_ptr.?)).*,
+    );
     try expectEqual(null, std.meta.fieldInfo(Named, .@"named-5").default_value_ptr);
     try expectEqual(null, std.meta.fieldInfo(Positional, .@"POS-1").default_value_ptr);
 }
@@ -2364,7 +2429,10 @@ test "subcommands" {
     const undef: Result = undefined;
     try expectEqual(1, std.meta.fields(@FieldType(Result, "named")).len);
     try expectEqual(1, std.meta.fields(@FieldType(Result, "positional")).len);
-    try expectEqual(2, std.meta.fields(@typeInfo(@FieldType(Result, "subcommand")).optional.child).len);
+    try expectEqual(
+        2,
+        std.meta.fields(@typeInfo(@FieldType(Result, "subcommand")).optional.child).len,
+    );
     try expectEqual([]const u8, @TypeOf(undef.named.foo));
     try expectEqual(u8, @TypeOf(undef.positional.BAR));
 
