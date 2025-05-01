@@ -165,13 +165,13 @@ pub const Command = struct {
         };
     }
 
-    /// Parse the command line arguments for this process
+    /// Parse the command line arguments for this process.
     pub fn parse(self: @This(), gpa: Allocator, iter: *std.process.ArgIterator) Error!self.Result() {
         return self.parseFromAnyIter(gpa, &iter);
     }
 
-    /// Parse the given commands (for testing purposes)
-    fn parseFromSlice(self: @This(), gpa: Allocator, args: []const []const u8) Error!self.Result() {
+    /// Parse commands from the given slice.
+    pub fn parseFromSlice(self: @This(), gpa: Allocator, args: []const []const u8) Error!self.Result() {
         const Iter = struct {
             slice: []const []const u8,
 
