@@ -182,16 +182,16 @@ pub const Command = struct {
     pub fn parseFromSlice(
         self: @This(),
         gpa: Allocator,
-        args: []const []const u8,
+        args: []const [:0]const u8,
     ) Error!self.Result() {
         const Iter = struct {
-            slice: []const []const u8,
+            slice: []const [:0]const u8,
 
-            fn init(slice: []const []const u8) @This() {
+            fn init(slice: []const [:0]const u8) @This() {
                 return .{ .slice = slice };
             }
 
-            fn next(iter: *@This()) ?[]const u8 {
+            fn next(iter: *@This()) ?[:0]const u8 {
                 if (iter.slice.len == 0) return null;
                 const result = iter.slice[0];
                 iter.slice = iter.slice[1..];
@@ -252,7 +252,7 @@ pub const Command = struct {
         }
 
         // Parse the named arguments
-        var peeked: ?[]const u8 = while (iter.*.next()) |arg_str| {
+        var peeked: ?[:0]const u8 = while (iter.*.next()) |arg_str| {
             // Stop parsing if we find a positional argument
             if (arg_str[0] != '-') {
                 break arg_str;
@@ -304,7 +304,7 @@ pub const Command = struct {
                             return error.Parser;
                         }
                     } else {
-                        var peeked: ?[]const u8 = null;
+                        var peeked: ?[:0]const u8 = null;
                         if (comptime self.argIsAccum(@intFromEnum(field_enum_inline))) {
                             const Items = @TypeOf(@field(result.named, field.name).items);
                             const Item = @typeInfo(Items).pointer.child;
@@ -412,7 +412,7 @@ pub const Command = struct {
         Type: type,
         comptime arg_str: []const u8,
         iter: anytype,
-        peeked: *?[]const u8,
+        peeked: *?[:0]const u8,
     ) Error!Type {
         // If we're optional, get the inner type
         const Inner = switch (@typeInfo(Type)) {
@@ -472,8 +472,8 @@ pub const Command = struct {
         self: @This(),
         arg_str: []const u8,
         iter: anytype,
-        peeked: *?[]const u8,
-    ) Error![]const u8 {
+        peeked: *?[:0]const u8,
+    ) Error![:0]const u8 {
         const value_str = peeked.* orelse iter.*.next() orelse {
             log.err("{s}: expected a value", .{arg_str});
             self.usageBrief();
@@ -606,7 +606,7 @@ pub const Command = struct {
 
         if (default) |untyped| {
             const typed: *const T = @alignCast(@ptrCast(untyped));
-            const default_fmt = if (Inner == []const u8 or @typeInfo(Inner) == .@"enum") b: {
+            const default_fmt = if (Inner == []const u8 or Inner == [:0]const u8 or @typeInfo(Inner) == .@"enum") b: {
                 break :b " (={?s})";
             } else if (@typeInfo(Inner) == .float) b: {
                 break :b " (={?d})";
@@ -2391,39 +2391,71 @@ test "lists" {
     }
 }
 
+test "null terminated strings" {
+    const options: Command = .{
+        .name = "command-name",
+        .named_args = &.{
+            NamedArg.init([:0]const u8, .{
+                .long = "foo",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init([:0]const u8, .{
+                .meta = "BAR",
+            }),
+        },
+    };
+    {
+        const result = try options.parseFromSlice(std.testing.allocator, &.{
+            "command-name",
+            "--foo",
+            "foo-value",
+            "bar-value",
+        });
+        defer options.parseFree(result);
+        try expectEqualStrings("foo-value", result.named.foo);
+        try expectEqualStrings("bar-value", result.positional.BAR);
+    }
+}
+
 test "subcommands" {
-    const options: Command = .{ .name = "command-name", .named_args = &.{
-        NamedArg.init([]const u8, .{
-            .long = "foo",
-        }),
-    }, .positional_args = &.{
-        PositionalArg.init(u8, .{
-            .meta = "BAR",
-        }),
-    }, .subcommands = &.{
-        .{
-            .name = "sub1",
-            .named_args = &.{
-                NamedArg.init([]const u8, .{
-                    .long = "sub1a",
-                }),
+    const options: Command = .{
+        .name = "command-name",
+        .named_args = &.{
+            NamedArg.init([]const u8, .{
+                .long = "foo",
+            }),
+        },
+        .positional_args = &.{
+            PositionalArg.init(u8, .{
+                .meta = "BAR",
+            }),
+        },
+        .subcommands = &.{
+            .{
+                .name = "sub1",
+                .named_args = &.{
+                    NamedArg.init([]const u8, .{
+                        .long = "sub1a",
+                    }),
+                },
+                .positional_args = &.{
+                    PositionalArg.init(u8, .{
+                        .meta = "SUB1B",
+                    }),
+                },
             },
-            .positional_args = &.{
-                PositionalArg.init(u8, .{
-                    .meta = "SUB1B",
-                }),
+            .{
+                .name = "sub2",
+                .named_args = &.{
+                    NamedArg.init([]const u8, .{
+                        .long = "sub2a",
+                    }),
+                },
+                .positional_args = &.{},
             },
         },
-        .{
-            .name = "sub2",
-            .named_args = &.{
-                NamedArg.init([]const u8, .{
-                    .long = "sub2a",
-                }),
-            },
-            .positional_args = &.{},
-        },
-    } };
+    };
 
     const Result = options.Result();
     const undef: Result = undefined;
