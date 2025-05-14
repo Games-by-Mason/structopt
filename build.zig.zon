@@ -1,7 +1,7 @@
 .{
     .name = .structopt,
     .fingerprint = 0x2636533c024a0b3a,
-    .version = "0.0.0",
+    .version = "1.0.0",
     .minimum_zig_version = "0.15.0-dev.388+05e217607",
     .dependencies = .{},
     .paths = .{
