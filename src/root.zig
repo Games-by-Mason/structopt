@@ -170,12 +170,10 @@ pub const Command = struct {
     }
 
     /// Parse the command line arguments for this process.
-    pub fn parse(
-        self: @This(),
-        gpa: Allocator,
-        iter: *std.process.ArgIterator,
-    ) Error!self.Result() {
-        return self.parseFromAnyIter(gpa, &iter);
+    pub fn parse(self: @This(), gpa: Allocator) Error!self.Result() {
+        var iter = try std.process.argsWithAllocator(gpa);
+        defer iter.deinit();
+        return self.parseFromIter(gpa, &iter);
     }
 
     /// Parse commands from the given slice.
@@ -206,10 +204,11 @@ pub const Command = struct {
         };
 
         var iter = Iter.init(args);
-        return self.parseFromAnyIter(gpa, &iter);
+        return self.parseFromIter(gpa, &iter);
     }
 
-    fn parseFromAnyIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
+    /// Parses the arguments from an iterator, usually `std.process.ArgIterator`.
+    pub fn parseFromIter(self: @This(), gpa: Allocator, iter: anytype) Error!self.Result() {
         const program_name = iter.*.next() orelse {
             log.err("expected program name", .{});
             return error.Parser;
