@@ -154,7 +154,7 @@ pub const Command = struct {
         gpa: Allocator,
         iter: *std.process.ArgIterator,
     ) self.Result() {
-        return self.parse(gpa, iter) catch |err| switch (err) {
+        return self.parseFromIter(gpa, iter) catch |err| switch (err) {
             error.Help => std.process.exit(0),
             error.Parser => std.process.exit(2),
             error.OutOfMemory => @panic("OOM"),
