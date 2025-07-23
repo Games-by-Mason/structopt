@@ -145,7 +145,7 @@ pub const Command = struct {
     }
 
     fn usageImpl(self: @This(), comptime brief: bool) void {
-        log.info("{}", .{self.fmtUsage(brief)});
+        log.info("{f}", .{self.fmtUsage(brief)});
     }
 
     /// Parse the command line arguments for this process, exit on help or failure. Panics on OOM.
@@ -496,13 +496,8 @@ pub const Command = struct {
 
     fn formatUsage(
         self: FormatUsageData,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         // At what column to start help
         const col = 50;
 
@@ -564,7 +559,7 @@ pub const Command = struct {
                 if (subcommand.description) |description| {
                     const count = std.fmt.count(sub_fmt, sub_args);
                     if (std.math.sub(usize, col, count) catch null) |padding| {
-                        try writer.writeByteNTimes(' ', padding);
+                        try writer.splatByteAll(' ', padding);
                     }
                     try writer.print("{s}\n", .{description});
                 }
@@ -591,13 +586,13 @@ pub const Command = struct {
 
         // Write the argument, and measure how many characters it took
         var count = if (short) |s| b: {
-            const name_fmt = "  -{c}, --{s}{}";
+            const name_fmt = "  -{c}, --{s}{f}";
             const name_args = .{ s, long, fmtType(T) };
             try writer.print(name_fmt, name_args);
             break :b std.fmt.count(name_fmt, name_args);
         } else b: {
             const prefix = if (positional) "" else "--";
-            const name_fmt = "  {s}{s}{}";
+            const name_fmt = "  {s}{s}{f}";
             const name_args = .{ prefix, long, fmtType(T) };
             try writer.print(name_fmt, name_args);
             break :b std.fmt.count(name_fmt, name_args);
@@ -606,11 +601,9 @@ pub const Command = struct {
         if (default) |untyped| {
             const typed: *const T = @alignCast(@ptrCast(untyped));
             const default_fmt = if (Inner == []const u8 or Inner == [:0]const u8 or @typeInfo(Inner) == .@"enum") b: {
-                break :b " (={?s})";
-            } else if (@typeInfo(Inner) == .float) b: {
-                break :b " (={?d})";
+                break :b " (={s})";
             } else b: {
-                break :b " (={?})";
+                break :b " (={any})";
             };
             const default_args = if (@typeInfo(Inner) == .@"enum") b: {
                 if (Inner != T) {
@@ -621,6 +614,12 @@ pub const Command = struct {
                     }
                 } else {
                     break :b .{@tagName(typed.*)};
+                }
+            } else if (Inner != T and (Inner == []const u8 or Inner == [:0]const u8)) b: {
+                if (typed.*) |some| {
+                    break :b .{some};
+                } else {
+                    break :b .{"null"};
                 }
             } else b: {
                 break :b .{typed.*};
@@ -638,7 +637,7 @@ pub const Command = struct {
         // Write the help message offset by the correct number of characters
         if (description) |desc| {
             if (std.math.sub(usize, col, count) catch null) |padding| {
-                try writer.writeByteNTimes(' ', padding);
+                try writer.splatByteAll(' ', padding);
             }
             try writer.writeAll(desc);
         }
@@ -647,7 +646,7 @@ pub const Command = struct {
         // If we're an enum, list all the options
         if (@typeInfo(Inner) == .@"enum") {
             for (std.meta.fieldNames(Inner)) |name| {
-                try writer.writeByteNTimes(' ', if (positional) 4 else 6);
+                try writer.splatByteAll(' ', if (positional) 4 else 6);
                 try writer.print("{s}\n", .{name});
             }
         }
@@ -658,39 +657,36 @@ pub const Command = struct {
         }
     }
 
-    fn formatType(
-        T: type,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
-        const Inner = switch (@typeInfo(T)) {
-            .optional => |optional| optional.child,
-            else => T,
-        };
-        const optional = if (Inner != T) "?" else "";
-        switch (@typeInfo(Inner)) {
-            .bool => {},
-            .int, .float => try writer.print(" <{s}{s}>", .{ optional, @typeName(Inner) }),
-            .@"enum" => if (optional.len > 0) try writer.print(" {s}", .{optional}),
-            .pointer => try writer.print(" <{s}string>", .{optional}),
-            else => unreachable,
-        }
-    }
-
     const FormatUsageData = struct {
         options: Self,
         brief: bool,
     };
 
-    fn fmtUsage(self: @This(), brief: bool) std.fmt.Formatter(formatUsage) {
+    fn fmtUsage(self: @This(), brief: bool) std.fmt.Alt(FormatUsageData, formatUsage) {
         return .{ .data = .{ .options = self, .brief = brief } };
     }
 
-    fn fmtType(T: type) std.fmt.Formatter(formatType) {
-        return .{ .data = T };
+    fn FormatType(T: type) type {
+        return struct {
+            pub fn format(_: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+                const Inner = switch (@typeInfo(T)) {
+                    .optional => |optional| optional.child,
+                    else => T,
+                };
+                const optional = if (Inner != T) "?" else "";
+                switch (@typeInfo(Inner)) {
+                    .bool => {},
+                    .int, .float => try writer.print(" <{s}{s}>", .{ optional, @typeName(Inner) }),
+                    .@"enum" => if (optional.len > 0) try writer.print(" {s}", .{optional}),
+                    .pointer => try writer.print(" <{s}string>", .{optional}),
+                    else => unreachable,
+                }
+            }
+        };
+    }
+
+    fn fmtType(T: type) FormatType(T) {
+        return .{};
     }
 };
 
@@ -1912,7 +1908,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{no_help.fmtUsage(true)},
         );
         defer std.testing.allocator.free(found);
@@ -1925,7 +1921,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_help.fmtUsage(true)},
         );
         defer std.testing.allocator.free(found);
@@ -1938,7 +1934,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{no_help.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
@@ -1975,7 +1971,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_help.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
@@ -2014,7 +2010,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_help_with_defaults_optional.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
@@ -2053,7 +2049,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_help_with_defaults_optional_null.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
@@ -2092,7 +2088,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_help_with_defaults.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
@@ -2131,7 +2127,7 @@ test "help menu" {
     {
         const found = try std.fmt.allocPrint(
             std.testing.allocator,
-            "{}",
+            "{f}",
             .{with_subcommand.fmtUsage(false)},
         );
         defer std.testing.allocator.free(found);
