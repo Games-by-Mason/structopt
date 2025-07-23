@@ -559,7 +559,7 @@ pub const Command = struct {
                 if (subcommand.description) |description| {
                     const count = std.fmt.count(sub_fmt, sub_args);
                     if (std.math.sub(usize, col, count) catch null) |padding| {
-                        _ = try writer.splatByte(' ', padding);
+                        try writer.splatByteAll(' ', padding);
                     }
                     try writer.print("{s}\n", .{description});
                 }
@@ -602,8 +602,6 @@ pub const Command = struct {
             const typed: *const T = @alignCast(@ptrCast(untyped));
             const default_fmt = if (Inner == []const u8 or Inner == [:0]const u8 or @typeInfo(Inner) == .@"enum") b: {
                 break :b " (={s})";
-            } else if (@typeInfo(Inner) == .float) b: {
-                break :b " (={any})";
             } else b: {
                 break :b " (={any})";
             };
@@ -639,7 +637,7 @@ pub const Command = struct {
         // Write the help message offset by the correct number of characters
         if (description) |desc| {
             if (std.math.sub(usize, col, count) catch null) |padding| {
-                _ = try writer.splatByte(' ', padding);
+                try writer.splatByteAll(' ', padding);
             }
             try writer.writeAll(desc);
         }
@@ -648,7 +646,7 @@ pub const Command = struct {
         // If we're an enum, list all the options
         if (@typeInfo(Inner) == .@"enum") {
             for (std.meta.fieldNames(Inner)) |name| {
-                _ = try writer.splatByte(' ', if (positional) 4 else 6);
+                try writer.splatByteAll(' ', if (positional) 4 else 6);
                 try writer.print("{s}\n", .{name});
             }
         }
@@ -659,9 +657,18 @@ pub const Command = struct {
         }
     }
 
-    fn formatType(T: type) fn (_: void, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    const FormatUsageData = struct {
+        options: Self,
+        brief: bool,
+    };
+
+    fn fmtUsage(self: @This(), brief: bool) std.fmt.Alt(FormatUsageData, formatUsage) {
+        return .{ .data = .{ .options = self, .brief = brief } };
+    }
+
+    fn FormatType(T: type) type {
         return struct {
-            pub fn format(_: void, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            pub fn format(_: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
                 const Inner = switch (@typeInfo(T)) {
                     .optional => |optional| optional.child,
                     else => T,
@@ -675,20 +682,11 @@ pub const Command = struct {
                     else => unreachable,
                 }
             }
-        }.format;
+        };
     }
 
-    const FormatUsageData = struct {
-        options: Self,
-        brief: bool,
-    };
-
-    fn fmtUsage(self: @This(), brief: bool) std.fmt.Alt(FormatUsageData, formatUsage) {
-        return .{ .data = .{ .options = self, .brief = brief } };
-    }
-
-    fn fmtType(T: type) std.fmt.Alt(void, formatType(T)) {
-        return .{ .data = {} };
+    fn fmtType(T: type) FormatType(T) {
+        return .{};
     }
 };
 
