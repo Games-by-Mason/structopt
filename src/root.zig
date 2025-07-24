@@ -340,7 +340,7 @@ pub const Command = struct {
         // Make sure all non optional args were found
         for (std.meta.tags(NamedArgEnum)) |arg| {
             if (!named_args.contains(arg)) {
-                log.err("missing required argument \"{s}\"", .{@tagName(arg)});
+                log.err("missing required argument \"{t}\"", .{arg});
                 self.usageBrief();
                 return error.Parser;
             }
