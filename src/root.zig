@@ -48,7 +48,7 @@ pub const Command = struct {
             if (@typeInfo(arg.type) == .optional and arg.accum) {
                 @compileError(arg.long ++ ": accum arguments cannot be nullable");
             }
-            const T = if (arg.accum) std.ArrayList(arg.type) else arg.type;
+            const T = if (arg.accum) std.array_list.Managed(arg.type) else arg.type;
             named_fields[i] = .{
                 .name = arg.long,
                 .type = T,
@@ -233,7 +233,7 @@ pub const Command = struct {
             if (arg.default) |default| {
                 @field(result.named, arg.long) = @as(
                     *const arg.type,
-                    @alignCast(@ptrCast(default)),
+                    @ptrCast(@alignCast(default)),
                 ).*;
             }
         }
@@ -599,7 +599,7 @@ pub const Command = struct {
         };
 
         if (default) |untyped| {
-            const typed: *const T = @alignCast(@ptrCast(untyped));
+            const typed: *const T = @ptrCast(@alignCast(untyped));
             const default_fmt = if (Inner == []const u8 or Inner == [:0]const u8 or @typeInfo(Inner) == .@"enum") b: {
                 break :b " (={s})";
             } else b: {
