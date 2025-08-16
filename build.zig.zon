@@ -2,7 +2,7 @@
     .name = .structopt,
     .fingerprint = 0x2636533c024a0b3a,
     .version = "1.0.0",
-    .minimum_zig_version = "0.15.0-dev.1145+3ae0ba096",
+    .minimum_zig_version = "0.15.0-dev.1564+2761cc8be",
     .dependencies = .{},
     .paths = .{
         "build.zig",
