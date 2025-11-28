@@ -14,7 +14,8 @@ pub const Error = error{ OutOfMemory, Parser, Help };
 pub const Command = struct {
     const Self = @This();
 
-    name: [:0]const u8,
+    /// May be elided on the root command.
+    name: ?[:0]const u8,
     description: ?[]const u8 = null,
     named_args: []const NamedArg = &.{},
     positional_args: []const PositionalArg = &.{},
@@ -22,7 +23,8 @@ pub const Command = struct {
 
     pub fn Result(comptime self: Command) type {
         return struct {
-            program_name: []const u8,
+            /// May be elided on the root command.
+            program_name: ?[]const u8,
             named: @FieldType(self.Subcommand(), "named"),
             positional: @FieldType(self.Subcommand(), "positional"),
             subcommand: @FieldType(self.Subcommand(), "subcommand"),
@@ -90,7 +92,7 @@ pub const Command = struct {
         var command_tags: [self.subcommands.len]std.builtin.Type.EnumField = undefined;
         for (self.subcommands, 0..) |command, i| {
             command_tags[i] = .{
-                .name = command.name,
+                .name = command.name.?,
                 .value = i,
             };
         }
@@ -106,7 +108,7 @@ pub const Command = struct {
             for (self.subcommands, 0..) |command, i| {
                 const Current = Subcommand(command);
                 command_fields[i] = .{
-                    .name = command.name,
+                    .name = command.name.?,
                     .type = Current,
                     .alignment = @alignOf(Current),
                 };
@@ -219,7 +221,7 @@ pub const Command = struct {
 
     fn parseCommand(self: @This(), gpa: Allocator, iter: anytype) Error!self.Subcommand() {
         // Validate types
-        comptime validateLongName(self.name);
+        if (self.name) |name| comptime validateLongName(name);
         inline for (self.named_args) |arg| {
             comptime validateLongName(arg.long);
             if (arg.short) |short| comptime validateShortName(short);
@@ -502,7 +504,9 @@ pub const Command = struct {
         const col = 50;
 
         // Brief
-        try writer.print("usage: {s}\n", .{self.options.name});
+        try writer.writeAll("usage:");
+        if (self.options.name) |name| try writer.print(" {s}", .{name});
+        try writer.writeByte('\n');
         if (self.brief) {
             try writer.print("--help for more info", .{});
             return;
@@ -554,7 +558,7 @@ pub const Command = struct {
             try writer.writeAll("\nsubcommands:\n");
             inline for (self.options.subcommands) |subcommand| {
                 const sub_fmt = "  {s}";
-                const sub_args = .{subcommand.name};
+                const sub_args = comptime .{subcommand.name.?};
                 try writer.print(sub_fmt, sub_args);
                 if (subcommand.description) |description| {
                     const count = std.fmt.count(sub_fmt, sub_args);
@@ -1877,7 +1881,7 @@ test "help menu" {
     };
 
     const with_subcommand: Command = .{
-        .name = "command-name",
+        .name = null,
         .description = "command help",
         .named_args = &.{
             NamedArg.init(bool, .{
@@ -2132,7 +2136,7 @@ test "help menu" {
         );
         defer std.testing.allocator.free(found);
         try expectEqualStrings(
-            \\usage: command-name
+            \\usage:
             \\
             \\command help
             \\
