@@ -42,84 +42,89 @@ pub const Command = struct {
 
     /// The result of parsing a command
     pub fn Subcommand(comptime self: Command) type {
-        var named_fields: [self.named_args.len]std.builtin.Type.StructField = undefined;
-        for (self.named_args, 0..) |arg, i| {
-            if (arg.type == ?bool) {
-                @compileError(arg.long ++ ": booleans cannot be nullable");
-            }
-            if (@typeInfo(arg.type) == .optional and arg.accum) {
-                @compileError(arg.long ++ ": accum arguments cannot be nullable");
-            }
-            const T = if (arg.accum) std.array_list.Managed(arg.type) else arg.type;
-            named_fields[i] = .{
-                .name = arg.long,
-                .type = T,
-                .default_value_ptr = arg.default,
-                .is_comptime = false,
-                .alignment = @alignOf(T),
-            };
-        }
-        const NamedResults = @Type(.{ .@"struct" = .{
-            .layout = .auto,
-            .fields = &named_fields,
-            .decls = &.{},
-            .is_tuple = false,
-        } });
+        const NamedResults = b: {
+            // https://codeberg.org/ziglang/zig/issues/30039
+            if (self.named_args.len == 0) break :b struct {};
 
-        var positional_fields: [self.positional_args.len]std.builtin.Type.StructField = undefined;
-        for (self.positional_args, 0..) |arg, i| {
-            if (@typeInfo(arg.type) == .optional) {
-                @compileError(arg.meta ++ ": positional arguments cannot be nullable");
+            var named_field_names: [self.named_args.len][]const u8 = undefined;
+            var named_field_types: [self.named_args.len]type = undefined;
+            var named_field_attrs: [self.named_args.len]std.builtin.Type.StructField.Attributes = undefined;
+            for (self.named_args, 0..) |arg, i| {
+                if (arg.type == ?bool) {
+                    @compileError(arg.long ++ ": booleans cannot be nullable");
+                }
+                if (@typeInfo(arg.type) == .optional and arg.accum) {
+                    @compileError(arg.long ++ ": accum arguments cannot be nullable");
+                }
+                const T = if (arg.accum) std.array_list.Managed(arg.type) else arg.type;
+                named_field_names[i] = arg.long;
+                named_field_types[i] = T;
+                named_field_attrs[i] = .{ .default_value_ptr = arg.default };
             }
-            if (arg.type == bool) {
-                @compileError(arg.meta ++ ": positional arguments cannot be booleans");
+            break :b @Struct(
+                .auto,
+                null,
+                &named_field_names,
+                &named_field_types,
+                &named_field_attrs,
+            );
+        };
+
+        const PositionalResults = b: {
+            // https://codeberg.org/ziglang/zig/issues/30039
+            if (self.positional_args.len == 0) break :b struct {};
+
+            var positional_field_names: [self.positional_args.len][]const u8 = undefined;
+            var positional_field_types: [self.positional_args.len]type = undefined;
+            var positional_field_attrs: [self.positional_args.len]std.builtin.Type.StructField.Attributes = undefined;
+            for (self.positional_args, 0..) |arg, i| {
+                if (@typeInfo(arg.type) == .optional) {
+                    @compileError(arg.meta ++ ": positional arguments cannot be nullable");
+                }
+                if (arg.type == bool) {
+                    @compileError(arg.meta ++ ": positional arguments cannot be booleans");
+                }
+                positional_field_names[i] = arg.meta;
+                positional_field_types[i] = arg.type;
+                positional_field_attrs[i] = .{};
             }
-            positional_fields[i] = .{
-                .name = arg.meta,
-                .type = arg.type,
-                .default_value_ptr = null,
-                .is_comptime = false,
-                .alignment = @alignOf(arg.type),
-            };
-        }
-        const PositionalResults = @Type(.{ .@"struct" = .{
-            .layout = .auto,
-            .fields = &positional_fields,
-            .decls = &.{},
-            .is_tuple = false,
-        } });
+            break :b @Struct(
+                .auto,
+                null,
+                &positional_field_names,
+                &positional_field_types,
+                &positional_field_attrs,
+            );
+        };
 
-        var command_tags: [self.subcommands.len]std.builtin.Type.EnumField = undefined;
-        for (self.subcommands, 0..) |command, i| {
-            command_tags[i] = .{
-                .name = command.name.?,
-                .value = i,
-            };
-        }
-        const SubcommandTag = @Type(.{ .@"enum" = .{
-            .tag_type = u16,
-            .fields = &command_tags,
-            .decls = &.{},
-            .is_exhaustive = true,
-        } });
+        const Subcommands = b: {
+            if (self.subcommands.len == 0) break :b void;
 
-        const Subcommands = if (self.subcommands.len > 0) b: {
-            var command_fields: [self.subcommands.len]std.builtin.Type.UnionField = undefined;
+            var subcommands_field_names: [self.subcommands.len][]const u8 = undefined;
+            var subcommands_field_types: [self.subcommands.len]type = undefined;
+            var subcommands_field_attrs: [self.subcommands.len]std.builtin.Type.UnionField.Attributes = undefined;
+            var subcommands_enum_values: [self.subcommands.len]u16 = undefined;
             for (self.subcommands, 0..) |command, i| {
                 const Current = Subcommand(command);
-                command_fields[i] = .{
-                    .name = command.name.?,
-                    .type = Current,
-                    .alignment = @alignOf(Current),
-                };
+                subcommands_field_names[i] = command.name.?;
+                subcommands_field_types[i] = Current;
+                subcommands_field_attrs[i] = .{};
+                subcommands_enum_values[i] = i;
             }
-            break :b @Type(.{ .@"union" = .{
-                .layout = .auto,
-                .tag_type = SubcommandTag,
-                .fields = &command_fields,
-                .decls = &.{},
-            } });
-        } else void;
+            const Tag = @Enum(
+                u16,
+                .exhaustive,
+                &subcommands_field_names,
+                &subcommands_enum_values,
+            );
+            break :b @Union(
+                .auto,
+                Tag,
+                &subcommands_field_names,
+                &subcommands_field_types,
+                &subcommands_field_attrs,
+            );
+        };
 
         return struct {
             named: NamedResults,
